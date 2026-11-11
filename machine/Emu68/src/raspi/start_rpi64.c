@@ -23,6 +23,7 @@
 #include "EmuFeatures.h"
 #include "RegisterAllocator.h"
 #include "version.h"
+#include "frf_pi4_post_versions.h"
 #include "logo/logo_emu68.h"
 #include "logo/logo_ppc.h"
 #include "logo/logo_pistorm.h"
@@ -298,11 +299,12 @@ static void frf_post_count(int x,int y,uint32_t v,uint16_t rgb)
 }
 static void frf_post_draw(void)
 {
+    /* With two version lines the POST occupies 236px plus 18px margin. */
     if(!frf_post_active||!framebuffer||!pitch||fb_width<360u||
-       fb_height<240u)return;
+       fb_height<254u)return;
     /* Top right, but outside the 75%-width central splash at 1080p.
-       320x202 at 720p and up. A fixed pixel font keeps HDMI crisp. */
-    const int w=320,h=202,x=(int)fb_width-w-18,y=18;
+       320x236 at 720p and up. A fixed pixel font keeps HDMI crisp. */
+    const int w=320,h=236,x=(int)fb_width-w-18,y=18;
     const uint16_t white=0xffffu,cyan=0x07ffu,green=0x07e0u,
                    yellow=0xffc0u,grey=0x8410u;
     frf_post_box(x,y,w,h,0x0000u);
@@ -310,9 +312,11 @@ static void frf_post_draw(void)
     frf_post_box(x,y+h-2,w,2,cyan);
     frf_post_box(x,y,2,h,cyan);
     frf_post_box(x+w-2,y,2,h,cyan);
-    frf_post_text(x+12,y+8,"EMU68 SYSTEM POST",white);
-    frf_post_text(x+12,y+28,"PI4 VL805 / ARM-NATIVE USB",cyan);
-    frf_post_box(x+12,y+52,w-24,1,grey);
+    frf_post_text(x+12,y+8,"EMU68AGA SYSTEM POST",white);
+    frf_post_text(x+12,y+28,FRF_POST_FRF_LABEL,green);
+    frf_post_text(x+12,y+48,FRF_POST_AGA_LABEL,yellow);
+    frf_post_text(x+12,y+68,"PI4 VL805 / ARM-NATIVE USB",cyan);
+    frf_post_box(x+12,y+92,w-24,1,grey);
     const uint32_t k=frf_r76_usb_keyboard_count,
                    m=frf_r76_usb_mouse_count,
                    g=frf_r76_usb_gamepad_count;
@@ -320,22 +324,22 @@ static void frf_post_draw(void)
     const uint32_t hubs=frf_r97_hub_count;
     const uint32_t ready=__atomic_load_n(&frf_usb_boot_ready,__ATOMIC_ACQUIRE);
     const uint32_t stage=__atomic_load_n(&frf_post_stage,__ATOMIC_ACQUIRE);
-    frf_post_text(x+12,y+61,"USB HOST:",white);
-    frf_post_text(x+156,y+61,ready?"ONLINE":"STARTING",ready?green:yellow);
-    frf_post_text(x+12,y+81,"KEYBOARD:",white);
-    frf_post_count(x+110,y+81,k,k?green:yellow);
-    frf_post_text(x+168,y+81,"MOUSE:",white);
-    frf_post_count(x+250,y+81,m,m?green:yellow);
-    frf_post_text(x+12,y+101,"GAMEPAD:",white);
-    frf_post_count(x+110,y+101,g,g?green:yellow);
-    frf_post_text(x+168,y+101,"HID:",white);
-    frf_post_count(x+250,y+101,hid,hid?green:yellow);
-    frf_post_text(x+12,y+121,"EXT HUBS:",white);
-    frf_post_count(x+110,y+121,hubs,hubs?cyan:yellow);
-    frf_post_text(x+12,y+141,"BOOT STAGE:",white);
-    frf_post_count(x+126,y+141,stage,cyan);
-    frf_post_text(x+12,y+161,"STATUS:",white);
-    frf_post_text(x+110,y+161,ready?"USB SCAN DONE":"BOOTING",ready?green:cyan);
+    frf_post_text(x+12,y+101,"USB HOST:",white);
+    frf_post_text(x+156,y+101,ready?"ONLINE":"STARTING",ready?green:yellow);
+    frf_post_text(x+12,y+121,"KEYBOARD:",white);
+    frf_post_count(x+110,y+121,k,k?green:yellow);
+    frf_post_text(x+168,y+121,"MOUSE:",white);
+    frf_post_count(x+250,y+121,m,m?green:yellow);
+    frf_post_text(x+12,y+141,"GAMEPAD:",white);
+    frf_post_count(x+110,y+141,g,g?green:yellow);
+    frf_post_text(x+168,y+141,"HID:",white);
+    frf_post_count(x+250,y+141,hid,hid?green:yellow);
+    frf_post_text(x+12,y+161,"EXT HUBS:",white);
+    frf_post_count(x+110,y+161,hubs,hubs?cyan:yellow);
+    frf_post_text(x+12,y+181,"BOOT STAGE:",white);
+    frf_post_count(x+126,y+181,stage,cyan);
+    frf_post_text(x+12,y+201,"STATUS:",white);
+    frf_post_text(x+110,y+201,ready?"USB SCAN DONE":"BOOTING",ready?green:cyan);
     __asm__ volatile("dsb ishst" ::: "memory");
 }
 void frf_boot_post_devices(void)

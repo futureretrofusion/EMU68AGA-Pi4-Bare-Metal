@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include "aga/chipset.h"
 #include "aga_glue.h"
+#include "frf_pi4_post_versions.h"
 #if defined(FRF_VIRTUAL_AGA) && defined(FRF_RTG_HANDOFF)
 #include "frf_rtg_handoff.h"
 #endif
@@ -1736,8 +1737,8 @@ static void r94_post_panel(uint32_t *dst)
     ovl_fill(dst,x,y,2,h,cyan);
     ovl_fill(dst,x+w-2,y,2,h,cyan);
     ovl_fill(dst,x,y+h-2,w,2,cyan);
-    r94_post_text(dst,x+9,y+5,"EMU68AGA  SYSTEM POST",white);
-    r94_post_text(dst,x+9,y+24,"PI4 VL805 / ARM-NATIVE USB",cyan);
+    r94_post_text(dst,x+9,y+5,"FRF PI4 " FRF_POST_PI4_VERSION " SYSTEM POST",white);
+    r94_post_text(dst,x+9,y+24,FRF_POST_AGA_LABEL,cyan);
     ovl_fill(dst,x+8,y+44,w-16,1,0xFF32526Bu);
     r94_post_text(dst,x+9,y+49,"USB HOST:",white);
     r94_post_text(dst,x+121,y+49,ready?"ONLINE":"STARTING",ready?green:amber);
