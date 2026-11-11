@@ -3,6 +3,7 @@
 #include "support.h"
 #include "frf_xhci_host.h"
 #include "frf_native_usb_input.h"
+#include "frf_r23_keyboard_guard.h"
 #include "frf_timebase.h"
 extern void aga_virtual_mouse_update(int dx, int dy, unsigned buttons);
 extern volatile uint8_t frf_usb_host_start_allowed;
@@ -20,6 +21,7 @@ extern void frf_post_usb_devices(unsigned kb, unsigned ms, unsigned gp, unsigned
  * first byte is a report ID without descriptor evidence. */
 static uint8_t frf_pi4_hid_report_id[4];
 static uint8_t frf_pi4_hid_has_id[4];
+static uint16_t frf_pi4_hid_vid[4],frf_pi4_hid_pid[4];
 static uint8_t frf_pi4_hid_descriptor[512] __attribute__((aligned(64)));
 static uint8_t frf_pi4_find_report_id(const uint8_t *desc,unsigned len,unsigned proto)
 {
@@ -168,6 +170,7 @@ void frf_pi4_xhci_hid_main(void)
     for(unsigned j=0;j<4u;j++) {
         frf_pi4_hid_report_id[j]=0u;
         frf_pi4_hid_has_id[j]=0u;
+        frf_pi4_hid_vid[j]=frf_pi4_hid_pid[j]=0u;
     }
 
     if(count>4u)count=4u;
@@ -178,6 +181,8 @@ void frf_pi4_xhci_hid_main(void)
             if(proto==1u)++keyboard;else ++mouse;
             uint32_t vid=0u,pid=0u,wanted=0u,received=0u;
             (void)frf_xhci_host_native_identity(i,&vid,&pid,&wanted);
+            frf_pi4_hid_vid[i]=(uint16_t)vid;
+            frf_pi4_hid_pid[i]=(uint16_t)pid;
             if(wanted>=8u && wanted<=sizeof(frf_pi4_hid_descriptor) &&
                frf_xhci_host_native_control(i,0x81u,6u,0x2200u,
                     (uint16_t)iface,frf_pi4_hid_descriptor,
@@ -289,15 +294,27 @@ void frf_pi4_xhci_hid_main(void)
             /* HID Report Protocol may prepend a report ID to boot-format
              * keyboard/mouse payloads; strip only the descriptor-declared ID.
              * Do not reinterpret unrelated reports from a combo receiver. */
-            if(((proto==1u && got>=9u) || (proto==2u && got>=5u)) &&
-               frf_pi4_hid_has_id[device]) {
-                if(got<2u || report[0]!=frf_pi4_hid_report_id[device])
+            if(frf_pi4_hid_has_id[device] && (proto==1u || proto==2u)) {
+                uint32_t id=frf_pi4_hid_report_id[device];
+                /* Pi3-v1.121 compatibility: boot protocol omits report IDs.
+                 * Some wireless receivers ignore SET_PROTOCOL and keep IDs.
+                 * A 4B mouse report is ID + buttons + dx + dy (not >=5B).
+                 * Other IDs on a composite interface are not mouse input. */
+                if(got && report[0]==id &&
+                   ((proto==1u && got>=9u) ||
+                    (proto==2u && got>=4u))) {
+                    for(uint32_t j=1u;j<got;j++)report[j-1u]=report[j];
+                    --got;
+                } else if(!((proto==1u && got==8u) ||
+                            (proto==2u && got>=3u && got<=4u &&
+                             (report[0]&0xf8u)==0u))) {
                     continue;
-                for(uint32_t j=1u;j<got;j++)report[j-1u]=report[j];
-                --got;
+                }
             }
             __atomic_store_n(&frf_r58_hid_last_size,got,__ATOMIC_RELAXED);
-            if(proto==1u && got>=8u) {
+            if(proto==1u && frf_r23_keyboard_allowed(
+                       frf_pi4_hid_vid[device],frf_pi4_hid_pid[device],
+                       proto,got)) {
                 frf_native_usb_keyboard_report(report);
                 frf_sdlog_xhci_stage=71u;
             } else if(proto==0u && pad_ready[device] && got>0u) {

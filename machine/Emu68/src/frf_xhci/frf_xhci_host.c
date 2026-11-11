@@ -308,6 +308,14 @@ struct NativeHID {
 static struct NativeHID g_native_hid[FRF_NATIVE_HID_MAX] __attribute__((aligned(64)));
 static uint32_t g_native_count, g_native_bank;
 static uint32_t g_r97_next_bank;
+/* The Pi3 v1.121 TinyUSB mount callback registers HID *interfaces*, not
+ * USB devices. Preserve this distinction for Pi4 composite receivers. */
+#define R121_HID_IF_MAX 4U
+struct R121HIDIf {
+    uint32_t iface, protocol, subclass, ep, mps, interval, report_length;
+};
+static struct R121HIDIf g_r121_hid_if[R121_HID_IF_MAX];
+static uint32_t g_r121_hid_if_count;
 volatile uint32_t frf_r97_ext_hub_slot,frf_r97_ext_hub_ports;
 volatile uint32_t frf_r97_ext_connected_mask,frf_r97_ext_live_mask;
 volatile uint32_t frf_r97_ext_error,frf_r97_ext_stage;
@@ -1332,6 +1340,105 @@ static int configure_interrupt_in(uint32_t ep, uint32_t mps, uint32_t interval)
     return ok;
 }
 
+/* Pi3 v1.121 HID parity: enumerate the interfaces of one receiver as
+ * independent xHCI interrupt endpoints, all within the SAME device slot.
+ * Configure the endpoint contexts in one command before setting USB config.
+ * Consumes one DMA ring bank per interface and one slot per USB receiver. */
+static uint32_t r121_boot_hid_count(void)
+{
+    uint32_t count=0u;
+    for(uint32_t n=0u;n<g_r121_hid_if_count;n++) {
+        struct R121HIDIf *i=&g_r121_hid_if[n];
+        if(i->ep && i->mps &&
+           (i->protocol==USB_HID_PROTOCOL_KEYBOARD ||
+            i->protocol==USB_HID_PROTOCOL_MOUSE))
+            ++count;
+    }
+    return count;
+}
+static int r121_configure_composite(uint32_t cfg,uint32_t vid,uint32_t pid)
+{
+    struct R121HIDIf *chosen[R121_HID_IF_MAX];
+    struct XHCIRing rings[R121_HID_IF_MAX];
+    uint32_t num=0u,flag=1u,max_dci=1u;
+    uint32_t first_bank=g_r97_next_bank;
+    for(uint32_t n=0u;n<g_r121_hid_if_count;n++) {
+        struct R121HIDIf *i=&g_r121_hid_if[n];
+        if(!i->ep || !i->mps ||
+           (i->protocol!=USB_HID_PROTOCOL_KEYBOARD &&
+            i->protocol!=USB_HID_PROTOCOL_MOUSE))continue;
+        uint32_t dci=2u*i->ep+1u;
+        if(dci>31u || (flag&(1u<<dci)))continue;
+        if(num>=FRF_NATIVE_HID_MAX-g_native_count ||
+           first_bank+num>=R97_CHILD_CONTEXT_BANKS)break;
+        chosen[num++]=i;
+        flag|=1u<<dci;
+        if(dci>max_dci)max_dci=dci;
+    }
+    if(num<2u)return 0;
+    host_zero(g_input_context,sizeof(g_input_context));
+    context_write32(input_ctx(0u),1u,flag);
+    fill_slot_context(max_dci);
+    for(uint32_t n=0u;n<num;n++) {
+        struct R121HIDIf *i=chosen[n];
+        uint32_t bank=first_bank+n;
+        uint32_t bi=i->interval?i->interval:1u;
+        uint32_t xint=0u;
+        if(g_port_speed>=3u) {
+            if(bi>16u)bi=16u;
+            xint=bi-1u;
+        } else {
+            uint32_t uf=bi*8u;
+            while(uf>1u) { ++xint; uf>>=1u; }
+            if(xint<3u)xint=3u;
+            if(xint>10u)xint=10u;
+        }
+        ring_init(&rings[n],g_hid_in_trbs[bank],XHCI_RING_TRBS);
+        fill_ep_context(i->ep*2u+1u,&rings[n],7u,i->mps,xint);
+    }
+    host_cache_clean(g_input_context,sizeof(g_input_context));
+    if(!command_submit(XHCI_CMD_CONFIG_EP,host_dma(g_input_context),
+                       g_slot_id<<24,1500u,NULL)) {
+        kprintf("[R121-HID] composite CONFIG_EP failed slot%u endpoints%u\n",
+                g_slot_id,num);
+        return 0;
+    }
+    if(!frf_xhci_host_control(0x00u,USB_REQ_SET_CONFIGURATION,
+                             (uint16_t)cfg,0u,NULL,0u,0,NULL))
+        return 0;
+    /* Boot keyboards/mice must use the same protocol that Pi3's TinyUSB
+     * class driver expects, while per-interface report IDs remain recorded. */
+    for(uint32_t n=0u;n<num;n++)
+        if(!frf_xhci_host_control(0x21u,USB_REQ_SET_PROTOCOL,0u,
+                 (uint16_t)chosen[n]->iface,NULL,0u,0,NULL))
+            kprintf("[R121-HID] SET_PROTOCOL boot rejected if%u\n",
+                    chosen[n]->iface);
+    for(uint32_t n=0u;n<num;n++) {
+        struct R121HIDIf *i=chosen[n];
+        struct NativeHID *h=&g_native_hid[g_native_count];
+        frf_zero_bytes(h,sizeof(*h));
+        h->slot=g_slot_id;h->protocol=i->protocol;
+        h->interface=i->iface;h->ep=i->ep;
+        h->dci=i->ep*2u+1u;h->mps=i->mps;
+        h->vid=vid;h->pid=pid;
+        h->report_desc_length=i->report_length;
+        h->ring=rings[n];h->ep0=g_ep0_ring;
+        h->ring_bank=first_bank+n;
+        h->valid=1u;
+        ++g_native_count;
+        kprintf("[R121-HID] LIVE slot%u HID%u if%u ep%u proto%u desc%u bank%u\n",
+                h->slot,g_native_count,h->interface,h->ep,h->protocol,
+                h->report_desc_length,h->ring_bank);
+    }
+    g_r97_next_bank+=num;
+    g_hid_in_dci=chosen[0]->ep*2u+1u;
+    g_hid_in_ring=rings[0];
+    g_hid_ready=1u;
+    frf_r83_hid_count=g_native_count;
+    frf_r89_native_count=g_native_count;
+    return 1;
+}
+
 int frf_xhci_host_hid_ready(void) { return g_hid_ready ? 1 : 0; }
 
 int frf_xhci_host_hid_poll(void *data, uint32_t length, uint32_t *actual)
@@ -1401,7 +1508,11 @@ int frf_xhci_host_native_control(uint32_t index,
     g_ep0_ring=h->ep0;
     int ok=frf_xhci_host_control(request_type,request,value,ifnum,
                                   data,length,direction_in,actual);
-    h->ep0=g_ep0_ring;
+    /* All interfaces share one EP0 hardware ring. Synchronise their
+     * software enqueue pointers after *every* class-control request. */
+    for(uint32_t j=0u;j<g_native_count;j++)
+        if(g_native_hid[j].valid && g_native_hid[j].slot==h->slot)
+            g_native_hid[j].ep0=g_ep0_ring;
     return ok;
 }
 
@@ -2253,6 +2364,8 @@ static int hub_parse_child(struct FRFXHCIHubDeviceInfo *d,
 
     uint32_t cur_class=0U, cur_sub=0U, cur_proto=0U;
     uint32_t cur_iface=0xffffffffu, mouse_iface=0xffffffffu;
+    int32_t r121_cur_index=-1;
+    g_r121_hid_if_count=0u;
     g_r96_hid_out_ep=g_r96_hid_out_mps=g_r96_hid_out_interval=0u;
     /* R91: HID descriptor's 0x22 report length belongs to SELECTED
      * interface.  Do not request 512B blindly, especially on FS/LS hubs. */
@@ -2263,6 +2376,41 @@ static int hub_parse_child(struct FRFXHCIHubDeviceInfo *d,
     for (uint32_t off=0U; off+2U<=got; ) {
         uint32_t len=g_ctrl_buffer[off], type=g_ctrl_buffer[off+1U];
         if (len<2U || off+len>got) break;
+        if(type==USB_DT_INTERFACE && len>=9u) {
+            r121_cur_index=-1;
+            /* Alternate zero only; each interface gets its own descriptor. */
+            if(g_ctrl_buffer[off+3u]==0u &&
+               g_ctrl_buffer[off+5u]==USB_CLASS_HID &&
+               g_r121_hid_if_count<R121_HID_IF_MAX) {
+                struct R121HIDIf *h=
+                    &g_r121_hid_if[g_r121_hid_if_count];
+                frf_zero_bytes(h,sizeof(*h));
+                h->iface=g_ctrl_buffer[off+2u];
+                h->subclass=g_ctrl_buffer[off+6u];
+                h->protocol=g_ctrl_buffer[off+7u];
+                r121_cur_index=(int32_t)g_r121_hid_if_count++;
+            }
+        } else if(r121_cur_index>=0 && type==0x21u && len>=9u) {
+            struct R121HIDIf *h=&g_r121_hid_if[r121_cur_index];
+            for(uint32_t n=0;n<g_ctrl_buffer[off+5u] &&
+                        6u+3u*n+2u<len;n++) {
+                uint32_t k=off+6u+3u*n;
+                if(g_ctrl_buffer[k]==0x22u) {
+                    h->report_length=(uint32_t)g_ctrl_buffer[k+1u] |
+                                    ((uint32_t)g_ctrl_buffer[k+2u]<<8);
+                    break;
+                }
+            }
+        } else if(r121_cur_index>=0 && type==USB_DT_ENDPOINT && len>=7u) {
+            struct R121HIDIf *h=&g_r121_hid_if[r121_cur_index];
+            uint32_t addr=g_ctrl_buffer[off+2u],attr=g_ctrl_buffer[off+3u];
+            if((addr&0x80u) && (attr&3u)==3u && !h->ep) {
+                h->ep=addr&15u;
+                h->mps=((uint32_t)g_ctrl_buffer[off+4u]|
+                        ((uint32_t)g_ctrl_buffer[off+5u]<<8))&0x7ffu;
+                h->interval=g_ctrl_buffer[off+6u];
+            }
+        }
         if (type==USB_DT_INTERFACE && len>=9U) {
             cur_iface=g_ctrl_buffer[off+2U];
             cur_class=g_ctrl_buffer[off+5U]; cur_sub=g_ctrl_buffer[off+6U]; cur_proto=g_ctrl_buffer[off+7U];
@@ -2496,6 +2644,12 @@ static int r97_scan_hub(struct R97HubState *hub)
             (void)r97_scan_hub(next);
             /* Re-activate this hub's EP0 before proceeding to next port. */
             r97_select_hub(hub);
+            continue;
+        }
+        if(r121_boot_hid_count()>=2u &&
+           r121_configure_composite(cfg,d->vid,d->pid)) {
+            frf_r97_ext_live_mask|=1u<<port;
+            frf_r97_ext_stage=7u;
             continue;
         }
         int usable=he && hm && hiface!=0xffffffffu &&
@@ -2960,6 +3114,17 @@ static int hub_scan_children(void)
                 g_tt_hub_slot=g_tt_port=g_tt_think_time=0u;
                 continue;
             }
+            ++g_hub_device_count;
+            continue;
+        }
+        if(r121_boot_hid_count()>=2u &&
+           r121_configure_composite(cfg,d->vid,d->pid)) {
+            frf_r89_native_candidate_mask|=1u<<port;
+            if(port<=4u) {
+                frf_r89_native_live_mask|=1u<<port;
+                frf_r90_sequence_step[port-1u]=5u;
+            }
+            if(port<=8u)frf_r83_downstream_step[port-1u]=5u;
             ++g_hub_device_count;
             continue;
         }
