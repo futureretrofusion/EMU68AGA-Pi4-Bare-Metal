@@ -674,8 +674,19 @@ static uint32_t src_rows = AGA_OUT_H, src_pitch = AGA_OUT_W * 4;
    left, in shape, centred. */
 static int scale_mode;
 static int border_x, border_y;
-static int scan_level, lscan_level;    /* the scanlines (below), for Whole lines */
-static int scan_shape;                 /* 0 Even (the default), 1 Crisp, 2 Whole lines */
+/* Pi3 v1.121 scanline levels are percentages; the old Pi4 renderer kept
+ * only a five-level 0..4 value and missed AGABOOT's 1% control protocol. */
+static int scan_pct, lscan_pct;
+static int nscan_pct = -1;   /* -1: inherit PAL percent for NTSC frames */
+static int scan_pct_now(void)
+{
+    return frame_woven ? lscan_pct :
+        (frame_ntsc && nscan_pct >= 0) ? nscan_pct : scan_pct;
+}
+static int scan_shape;    /* Even, Crisp, Whole, Beam */
+static int scan_top;      /* line mask starts at bottom or top */
+#define SHAPE_WHOLE(x) ((x)==2 || (x)==4)
+#define SHAPE_BEAM(x) ((x)==4)
 static void set_source(void);
 static void fit(void)
 {
@@ -704,7 +715,7 @@ static void fit(void)
        Every line then gets the same rows, the last one dark: at 800 x 600,
        where 4:3 gives a line 2.1 rows, 2 each. Nothing when they are whole
        already (Scale integer) or fewer than 2 (no scanlines). */
-    if (scan_shape == 2 && (frame_woven ? lscan_level : scan_level)) {
+    if (SHAPE_WHOLE(scan_shape) && scan_pct_now()) {
         uint32_t lines = (frame_woven && dst_h >= 2 * crop_h) ? 2 * crop_h : crop_h;   /* as set_source shows it */
         uint32_t n = lines ? dst_h / lines : 0;
         if (n >= 2 && n * lines != dst_h) {
@@ -1026,7 +1037,7 @@ static uint32_t mask_plane(uint32_t o)
 
 void aga_video_set_scanlines(int level)
 {
-    scan_level = (level >= 0 && level <= 4) ? level : 0;
+    scan_pct = (level >= 0 && level <= 4) ? level * 25 : 0;
     apply_crop();                       /* Whole lines fits the picture to them */
     calib_refresh();
 }
@@ -1036,7 +1047,7 @@ void aga_video_set_scanlines(int level)
    each one where the display is tall enough - off (0) suits most */
 void aga_video_set_laced_scanlines(int level)
 {
-    lscan_level = (level >= 0 && level <= 4) ? level : 0;
+    lscan_pct = (level >= 0 && level <= 4) ? level * 25 : 0;
     apply_crop();
 }
 
@@ -1049,9 +1060,30 @@ void aga_video_set_laced_scanlines(int level)
                     row taller than others (up to 1.115 the only one)
      2 Whole lines  picture fitted to a whole number of rows a line (fit), a
                     little smaller, its shape kept: clean at low resolutions */
+void aga_video_set_ntsc_scanlines(int v)
+{
+    nscan_pct = (v >= 1 && v <= 5) ? (v - 1) * 25 : -1;
+    apply_crop();
+    calib_refresh();
+}
+
+/* 1.119 Pi 3 HVS selective port: scanline strength in 1% steps. */
+static int scan_select;
+void aga_video_scan_select(int what) { scan_select = what; }
+void aga_video_scan_value(int v)
+{
+    int pct = v < 0 ? 0 : (v > 100 ? 100 : v);
+    if (scan_select == 0) scan_pct = pct;
+    else if (scan_select == 1) lscan_pct = pct;
+    else if (scan_select == 2) nscan_pct = v > 100 ? -1 : pct;
+    else if (scan_select == 3) scan_top = (v == 1) ? 1 : 0;
+    else return; /* frame blend, Pi4 V3D, CRT fields, fill: not yet supported */
+    apply_crop();
+    calib_refresh();
+}
 void aga_video_set_scan_shape(int shape)
 {
-    scan_shape = (shape >= 0 && shape <= 2) ? shape : 0;
+    scan_shape = (shape >= 0 && shape <= 4 && shape != 3) ? shape : 0;
     apply_crop();
     calib_refresh();
 }
@@ -1059,18 +1091,23 @@ void aga_video_set_scan_shape(int shape)
 /* The image for this geometry, written if not already there; 0 = none now.
    Lines are the rows the plane reads: one Amiga line each, or one woven row
    each on an interlaced screen. */
+/* Beam's profile: (1 + cos(2 pi j / 64)) / 2 of 255 for j 0-32, half a line
+   from its edge to its middle (the other half mirrors it) */
+static const uint8_t beam_w[33] = {
+    255, 254, 253, 250, 245, 240, 234, 226, 218, 208, 198, 188, 176, 165, 152, 140,
+    128, 115, 103, 90, 79, 67, 57, 47, 37, 29, 21, 15, 10, 5, 2, 1, 0 };
+static uint8_t scan_row[4096];         /* scan_ready tamnoća za svaki display red */
 static int scan_ready(void)
 {
-    int level = frame_woven ? lscan_level : scan_level;
+    int pct = scan_pct_now();
     uint32_t lines = src_rows;
-    if (!level || dst_h < 2 * lines) return 0;
-    if ((uint64_t)SCAN_OFF + (uint64_t)dst_h * SCAN_W * 4 > SNAP_OFF) return 0;   /* the crop screen's snapshot is above */
-    if (mask_rows == dst_h && mask_src == lines && mask_level == (uint32_t)level && mask_shape == (uint32_t)scan_shape)
+    uint32_t shape = (uint32_t)scan_shape | (uint32_t)scan_top << 4;
+    if (!pct || dst_h < 2 * lines || dst_h > sizeof scan_row) return 0;
+    if ((uint64_t)SCAN_OFF + (uint64_t)dst_h * SCAN_W * 4 > SNAP_OFF) return 0;   /* snapshot crop screena je gore */
+    if (mask_rows == dst_h && mask_src == lines && mask_level == (uint32_t)pct && mask_shape == shape)
         return 1;
-    uint32_t *m = (uint32_t *)(fb_va + SCAN_OFF);
-    uint32_t alpha = scan_alpha[level];                     /* black; bytes A,R,G,B like the frames */
+    uint32_t alpha = ((uint32_t)pct * 255 + 50) / 100;      /* crno; bajtovi A,R,G,B kao frameovi */
     for (uint32_t r = 0; r < dst_h; r++) {
-        uint32_t v = 0;
         if (scan_shape == 0) {
             /* Even, counted in 1/dst_h of a line: row r covers [r * lines,
                r * lines + lines), the gap of the line it starts in the last
@@ -1079,18 +1116,51 @@ static int scan_ready(void)
             uint32_t lo = r * lines, hi = lo + lines;
             uint32_t end = (lo / dst_h + 1) * dst_h, gap = end - lines;
             uint32_t s0 = lo > gap ? lo : gap, e0 = hi < end ? hi : end;
-            if (e0 > s0) v = ((alpha * (e0 - s0) + lines / 2) / lines) << 24;
+            scan_row[r] = (uint8_t)(e0 > s0 ? (alpha * (e0 - s0) + lines / 2) / lines : 0);
         } else {
-            uint32_t line = ((2 * r + 1) * lines) / (2 * dst_h);
-            uint32_t next = ((2 * r + 3) * lines) / (2 * dst_h);
-            if (next != line || r + 1 == dst_h) v = alpha << 24;   /* a line's last row */
+            scan_row[r] = 0;
         }
+    }
+    if (scan_shape != 0) {
+        /* line by line, its rows as the scaler shows them (a row belongs to
+           the line its middle falls in) */
+        for (uint32_t r = 0; r < dst_h; ) {
+            uint32_t k = ((2 * r + 1) * lines) / (2 * dst_h), r0 = r;
+            while (r < dst_h && ((2 * r + 1) * lines) / (2 * dst_h) == k) r++;
+            uint32_t h = r - r0;
+            if (SHAPE_BEAM(scan_shape) && h >= 3) {
+                /* the cosine at each row's middle, (2i + 1) / 2h of the
+                   line, its edge rows at the full strength */
+                uint32_t e = beam_w[(32 + h / 2) / h];
+                for (uint32_t i = 0; i < h; i++) {
+                    uint32_t j = ((2 * i + 1) * 32 + h / 2) / h;
+                    if (j > 32) j = 64 - j;
+                    scan_row[r0 + i] = (uint8_t)(e ? alpha * beam_w[j] / e : alpha);
+                }
+            } else {
+                /* Crisp: the line's last row - as dark for the line as one
+                   row is for a line of average height, so a 3-row line of
+                   4:3's 3.78 is no darker than a 4-row one (the same row at
+                   every whole step); what passes 255 goes on the row above */
+                uint32_t want = (alpha * h * lines + dst_h / 2) / dst_h;
+                scan_row[r - 1] = (uint8_t)(want > 255 ? 255 : want);
+                if (want > 255 && h >= 2) scan_row[r - 2] = (uint8_t)(want - 255 > 255 ? 255 : want - 255);
+            }
+        }
+    }
+    /* Top: slika naopako - svaki gap na početku svoje linije (CRT fields
+       zadržava Bottomov, pomaknut sa slikom umjesto toga: show) */
+    uint32_t *m = (uint32_t *)(fb_va + SCAN_OFF);
+    for (uint32_t r = 0; r < dst_h; r++) {
+        uint32_t v = (uint32_t)scan_row[scan_top == 1 ? dst_h - 1 - r : r] << 24;
         for (int x = 0; x < SCAN_W; x++) *m++ = v;
     }
-    mask_rows = dst_h; mask_src = lines; mask_level = (uint32_t)level; mask_shape = (uint32_t)scan_shape;
+    mask_rows = dst_h; mask_src = lines; mask_level = (uint32_t)pct; mask_shape = shape;
     return 1;
 }
 
+/* The scanline plane at word o, over the picture, scaled across only (needs
+   no line buffer). Returns the word after it. */
 /* The scanline plane at word o, over the picture, scaled across only (needs
    no line buffer). Returns the word after it. */
 static uint32_t scan_plane(uint32_t o)

@@ -1057,6 +1057,18 @@ int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFC) == 0x5920) { aga_video_set_look((int)(value & 3)); return 1; }
     /* $597S: scale, 0 4:3 / 1 integer / 2 fill; $598L: scanlines, 0 off to 4 - agaboot RTG Image */
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFC) == 0x5970) { aga_video_set_scale((int)(value & 3)); return 1; }
+    /* Pi3 1.119-1.121 AGABOOT scanline control: encoded bytes with bit 1 clear.
+     * Both exception handler copies must decode these before generic control.
+     * The select code chooses PAL, laced, NTSC or top/bottom; the value is 0..100. */
+    if (far == 0xDFF1F2 && size == 2 && (value & 0xFF02u) == 0x5000u) {
+        aga_video_scan_select((int)((value & 1u) | ((value >> 1) & 0x7eu))); return 1;
+    }
+    if (far == 0xDFF1F2 && size == 2 && (value & 0xFF02u) == 0x5300u) {
+        aga_video_scan_value((int)((value & 1u) | ((value >> 1) & 0x7eu))); return 1;
+    }
+    if (far == 0xDFF1F2 && size == 2 && (value & 0xFFF2u) == 0x5170u) {
+        aga_video_set_ntsc_scanlines((int)((value & 1u) | ((value >> 1) & 6u))); return 1;
+    }
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFF8) == 0x5980) { aga_video_set_scanlines((int)(value & 7)); return 1; }
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFF00) == 0x5700) { aga_video_set_pos_x((int8_t)(value & 0xFF)); return 1; }
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFF00) == 0x5600) { aga_video_set_pos_y((int8_t)(value & 0xFF)); return 1; }
@@ -1651,6 +1663,18 @@ int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFC) == 0x5920) { aga_video_set_look((int)(value & 3)); return 1; }
     /* $597S: scale, 0 4:3 / 1 integer / 2 fill; $598L: scanlines, 0 off to 4 - agaboot RTG Image */
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFC) == 0x5970) { aga_video_set_scale((int)(value & 3)); return 1; }
+    /* Pi3 1.119-1.121 AGABOOT scanline control: encoded bytes with bit 1 clear.
+     * Both exception handler copies must decode these before generic control.
+     * The select code chooses PAL, laced, NTSC or top/bottom; the value is 0..100. */
+    if (far == 0xDFF1F2 && size == 2 && (value & 0xFF02u) == 0x5000u) {
+        aga_video_scan_select((int)((value & 1u) | ((value >> 1) & 0x7eu))); return 1;
+    }
+    if (far == 0xDFF1F2 && size == 2 && (value & 0xFF02u) == 0x5300u) {
+        aga_video_scan_value((int)((value & 1u) | ((value >> 1) & 0x7eu))); return 1;
+    }
+    if (far == 0xDFF1F2 && size == 2 && (value & 0xFFF2u) == 0x5170u) {
+        aga_video_set_ntsc_scanlines((int)((value & 1u) | ((value >> 1) & 6u))); return 1;
+    }
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFF8) == 0x5980) { aga_video_set_scanlines((int)(value & 7)); return 1; }
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFF00) == 0x5700) { aga_video_set_pos_x((int8_t)(value & 0xFF)); return 1; }
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFF00) == 0x5600) { aga_video_set_pos_y((int8_t)(value & 0xFF)); return 1; }
