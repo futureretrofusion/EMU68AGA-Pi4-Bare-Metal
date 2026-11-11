@@ -1,0 +1,17 @@
+build/
+**/build/
+*.img
+*.img.gz
+*.elf
+*.hdf
+*.adf
+*.rom
+*.iso
+*.o
+*.obj
+*.log
+*.tmp
+config-before-*.txt
+*.pem
+*.key
+**/__pycache__/

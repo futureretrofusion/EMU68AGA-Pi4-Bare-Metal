@@ -1,0 +1,16 @@
+UAE / E-UAE / WinUAE attributions
+================================
+The AGA-PiStorm chipset source in machine/core/src includes and
+derives routines from UAE, E-UAE and WinUAE. The specific copied,
+translated or inspired routines, original source files and
+copyright years are detailed in the original per-file headers
+in machine/core/src. Those file-level notices are preserved.
+
+Original authors and contributors named in the source include:
+Bernd Schmidt (UAE); Alessandro Bissacco; Toni Wilen
+(WinUAE), and other UAE/E-UAE/WinUAE contributors.
+
+This summary was reconstructed from source-level notices and is
+not asserted to reproduce any missing original notice verbatim.
+The AGA code is licensed GPL-2.0-only: machine/COPYING.
+Emu68's MPL-2.0 notices remain in place.
