@@ -15,6 +15,42 @@ extern volatile uint32_t frf_usb_r54_attempts;
  * Never DMA into a CPU1 stack local: invalidation may destroy live frames. */
 static uint8_t frf_native_pad_descriptor[512] __attribute__((aligned(64)));
 extern void frf_post_usb_devices(unsigned kb, unsigned ms, unsigned gp, unsigned msc);
+/* Pi3-compatible HID report-ID discovery for keyboard and mouse.
+ * Parse HID short items and application collections, never guess that the
+ * first byte is a report ID without descriptor evidence. */
+static uint8_t frf_pi4_hid_report_id[4];
+static uint8_t frf_pi4_hid_has_id[4];
+static uint8_t frf_pi4_hid_descriptor[512] __attribute__((aligned(64)));
+static uint8_t frf_pi4_find_report_id(const uint8_t *desc,unsigned len,unsigned proto)
+{
+    unsigned page=0,usage=0,depth=0,active=0;
+    uint8_t id=0;
+    for(unsigned i=0;i<len;) {
+        unsigned b=desc[i++];
+        if(b==0xfeu) { if(i+2u>len)break;unsigned n=desc[i];i+=2u;
+            if(n>len-i)break;
+            i+=n;
+            continue; }
+        unsigned size=b&3u;if(size==3u)size=4u;
+        if(size>len-i)break;
+        unsigned value=0;for(unsigned j=0;j<size;j++)value|=(unsigned)desc[i+j]<<(j*8u);
+        i+=size;
+        unsigned type=(b>>2u)&3u,tag=(b>>4u)&15u;
+        if(type==1u && tag==0u)page=value;
+        else if(type==2u && tag==0u)usage=value;
+        else if(type==0u && tag==10u) {
+            if(depth==0u)active=(value==1u && page==1u &&
+                                usage==(proto==1u?6u:2u));
+            ++depth;
+        } else if(type==0u && tag==12u) {
+            if(depth)--depth;
+            if(!depth)active=0;
+        } else if(type==1u && tag==8u && active && value && value<256u) {
+            id=(uint8_t)value;break;
+        }
+    }
+    return id;
+}
 /* R91 sticky USB gamepad VID:PID, report descriptor and live input diag. */
 volatile uint32_t frf_r91_last_pad_vidpid;
 volatile uint32_t frf_r91_pad_desc_expected,frf_r91_pad_desc_received;
@@ -129,12 +165,33 @@ void frf_pi4_xhci_hid_main(void)
     uint32_t count=scanned?frf_xhci_host_native_count():0u;
     unsigned keyboard=0u, mouse=0u, gamepad=0u;
     uint8_t pad_ready[4]={0};
+    for(unsigned j=0;j<4u;j++) {
+        frf_pi4_hid_report_id[j]=0u;
+        frf_pi4_hid_has_id[j]=0u;
+    }
+
     if(count>4u)count=4u;
     for(uint32_t i=0u;i<count;i++) {
         uint32_t proto=255u,iface=0u;
         if(!frf_xhci_host_native_info(i,&proto,&iface))continue;
-        if(proto==1u)++keyboard;
-        else if(proto==2u)++mouse;
+        if(proto==1u || proto==2u) {
+            if(proto==1u)++keyboard;else ++mouse;
+            uint32_t vid=0u,pid=0u,wanted=0u,received=0u;
+            (void)frf_xhci_host_native_identity(i,&vid,&pid,&wanted);
+            if(wanted>=8u && wanted<=sizeof(frf_pi4_hid_descriptor) &&
+               frf_xhci_host_native_control(i,0x81u,6u,0x2200u,
+                    (uint16_t)iface,frf_pi4_hid_descriptor,
+                    (uint16_t)wanted,1,&received) && received==wanted) {
+                uint8_t id=frf_pi4_find_report_id(frf_pi4_hid_descriptor,
+                                                   received,proto);
+                if(id) {
+                    frf_pi4_hid_has_id[i]=1u;
+                    frf_pi4_hid_report_id[i]=id;
+                }
+            }
+            kprintf("[PI4-HID] slot%u VID:PID=%04x:%04x proto%u descriptor=%u reportID=%u\n",
+                    i,vid,pid,proto,received,frf_pi4_hid_report_id[i]);
+        }
         else if(proto==0u) {
             frf_r92_pad_hid_index=i;
             ++frf_r91_pad_candidate;
@@ -229,6 +286,16 @@ void frf_pi4_xhci_hid_main(void)
         int completed=frf_xhci_host_native_poll_any(report,sizeof(report),
                                                      &got,&device,&proto);
         if(completed && device<count) {
+            /* HID Report Protocol may prepend a report ID to boot-format
+             * keyboard/mouse payloads; strip only the descriptor-declared ID.
+             * Do not reinterpret unrelated reports from a combo receiver. */
+            if(((proto==1u && got>=9u) || (proto==2u && got>=5u)) &&
+               frf_pi4_hid_has_id[device]) {
+                if(got<2u || report[0]!=frf_pi4_hid_report_id[device])
+                    continue;
+                for(uint32_t j=1u;j<got;j++)report[j-1u]=report[j];
+                --got;
+            }
             __atomic_store_n(&frf_r58_hid_last_size,got,__ATOMIC_RELAXED);
             if(proto==1u && got>=8u) {
                 frf_native_usb_keyboard_report(report);
