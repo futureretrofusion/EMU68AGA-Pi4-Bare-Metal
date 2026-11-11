@@ -29,3 +29,7 @@ AGA-PiStorm chipset code is GPL-2.0-only; Emu68 is MPL-2.0. UAE/E-UAE/WinUAE cop
 ## Other platforms
 
 The separate Raspberry Pi 3 project remains at [Future Retro Fusion / EMU68AGA-Bare-Metal](https://github.com/futureretrofusion/EMU68AGA-Bare-Metal). Pi4 development, issues and releases should be tracked in this repository.
+
+## Installing with CaffeineOS
+
+See [CaffeineOS installation and VideoCore.card upgrade](docs/CAFFEINEOS_INSTALL.md) for the FAT partition method, early-boot transfer and Amiga emulator method.
