@@ -953,11 +953,28 @@ static void r105_protocol_root_masks(uint32_t ports)
         cp+=next;
     }
 }
+/* R106 regression fix:
+ * On a working Pi4 the *attached* PORTSC may read 0x400202E1
+ * (CCS=1 but speed=0) before USB PORT_RESET. R104 accepted this
+ * connected root; R105 discarded it, resulting in no input at all.
+ * Speed 0 means not yet resolved, NOT an invalid attached port.
+ * Keep USB3 speed >=4 excluded from the USB2 HID scan, but treat the
+ * protocol masks as rankings, not blockers: firmware/VL805 revisions
+ * do not always publish the same port metadata before reset. */
 static int r105_usb2_root_eligible(uint32_t n,uint32_t speed)
 {
-    if(n<1u || n>32u || speed<1u || speed>3u)return 0;
-    uint32_t mask=frf_r105_usb2_root_mask;
-    return !mask || (mask&(1u<<(n-1u)))!=0u;
+    if(n<1u || n>32u || speed>3u)return 0;
+    return 1; /* include speed 0; reset will establish the actual speed */
+}
+static uint32_t r106_usb2_root_rank(uint32_t n,uint32_t speed)
+{
+    if(speed==3u)return 4u; /* enumerated USB2 high speed */
+    if(speed==1u || speed==2u)return 3u;
+    /* Connected but speed unresolved. Favor the advertised USB2 protocol
+     * when trustworthy, without making it mandatory. */
+    if(n && n<=32u &&
+       (frf_r105_usb2_root_mask&(1u<<(n-1u))))return 2u;
+    return 1u; /* preserve the working R104 unknown-speed fallback */
 }
 static int r105_usb2_root_attached(void)
 {
@@ -1001,14 +1018,13 @@ static int port_reset(void)
             }
             if (!(v&XHCI_PORT_CCS)) continue;
             uint32_t speed=(v&XHCI_PORT_SPEED_MASK)>>XHCI_PORT_SPEED_SHIFT;
-            /* R105: Only USB2 root ports are useful for the Pi4's
-             * internal USB2 hub. Do not strand all HID by choosing
-             * an attached SuperSpeed drive on a normal four-port Pi4. */
+            /* R106: accept attached speed=0 (observed on working R104).
+             * Prefer known USB2 HS and protocol-tagged unknown roots. */
             if(!r105_usb2_root_eligible(n,speed))continue;
-            uint32_t rank=(speed==3u)?3u:2u;
+            uint32_t rank=r106_usb2_root_rank(n,speed);
             if(!selected || rank>selected_rank) {
                 selected=n; selected_rank=rank;
-                stable_deadline=host_deadline_ms(rank==3u?100u:500u);
+                stable_deadline=host_deadline_ms(rank==4u?100u:500u);
                 p=v;
                 kprintf("[R81-USB2] candidate root%u speed%u rank%u PORTSC=%08x\n",
                         n,speed,rank,v);
@@ -1016,9 +1032,10 @@ static int port_reset(void)
                 p=v;
             }
         }
-        /* USB2 high-speed root wins early; FS/LS fallback only once
-         * the entire discovery window has elapsed. */
-        if (selected && selected_rank==3u && host_timed_out(stable_deadline)) break;
+        /* Only a confirmed USB2 high-speed root can win early.
+         * Unresolved speed 0 remains eligible, but leave time for a
+         * protocol-tagged USB2 root to appear on a stock Pi4. */
+        if (selected && selected_rank==4u && host_timed_out(stable_deadline)) break;
         __asm__ volatile("yield");
     }
     if (!selected || !(p&XHCI_PORT_CCS) ||
