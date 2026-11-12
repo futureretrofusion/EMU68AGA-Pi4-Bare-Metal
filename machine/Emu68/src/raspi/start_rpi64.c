@@ -340,27 +340,36 @@ static void frf_post_draw(void)
     const int live=(k+m+g)!=0u && hid!=0u;
     const int failed=(host_stage&0x80000000u)!=0u && host_error!=0u;
     frf_post_text(x+12,y+101,"USB HOST:",white);
+    /* R108: native USB enumeration occurs AFTER the boot splash. Displaying
+     * zero devices before CPU1 has scanned is misleading: use --/DEFERRED. */
     frf_post_text(x+156,y+101,live?"HID READY":failed?"HOST ERROR":
-                  ready?"NO HID":"STARTING",live?green:yellow);
+                  ready?"NO HID":"DEFERRED",live?green:yellow);
     frf_post_text(x+12,y+121,"KEYBOARD:",white);
-    frf_post_count(x+110,y+121,k,k?green:yellow);
+    if(ready)frf_post_count(x+110,y+121,k,k?green:yellow);
+    else frf_post_text(x+110,y+121,"--",yellow);
     frf_post_text(x+168,y+121,"MOUSE:",white);
-    frf_post_count(x+250,y+121,m,m?green:yellow);
+    if(ready)frf_post_count(x+250,y+121,m,m?green:yellow);
+    else frf_post_text(x+250,y+121,"--",yellow);
     frf_post_text(x+12,y+141,"GAMEPAD:",white);
-    frf_post_count(x+110,y+141,g,g?green:yellow);
+    if(ready)frf_post_count(x+110,y+141,g,g?green:yellow);
+    else frf_post_text(x+110,y+141,"--",yellow);
     frf_post_text(x+168,y+141,"HID:",white);
-    frf_post_count(x+250,y+141,hid,hid?green:yellow);
+    if(ready)frf_post_count(x+250,y+141,hid,hid?green:yellow);
+    else frf_post_text(x+250,y+141,"--",yellow);
     frf_post_text(x+12,y+161,"EXT HUBS:",white);
-    frf_post_count(x+110,y+161,hubs,hubs?cyan:yellow);
+    if(ready)frf_post_count(x+110,y+161,hubs,hubs?cyan:yellow);
+    else frf_post_text(x+110,y+161,"--",yellow);
     frf_post_text(x+168,y+161,"ROOT:",white);
-    frf_post_count(x+270,y+161,frf_usb_root_port_selected,cyan);
+    if(frf_usb_host_phase)frf_post_count(x+270,y+161,frf_usb_root_port_selected,cyan);
+    else frf_post_text(x+270,y+161,"--",yellow);
     frf_post_text(x+12,y+181,"BOOT STAGE:",white);
     frf_post_count(x+126,y+181,stage,cyan);
     frf_post_text(x+168,y+181,"XHCI ERR:",white);
-    frf_post_count(x+270,y+181,host_error,host_error?yellow:green);
+    if(frf_usb_host_phase)frf_post_count(x+270,y+181,host_error,host_error?yellow:green);
+    else frf_post_text(x+270,y+181,"--",yellow);
     frf_post_text(x+12,y+201,"STATUS:",white);
     frf_post_text(x+110,y+201,live?"USB INPUT OK":failed?"USB HOST FAILED":
-                  ready?"ZERO HID":"BOOTING",live?green:yellow);
+                  ready?"ZERO HID":"SCAN AFTER BOOT",live?green:yellow);
     frf_post_text(x+12,y+221,"HOST PHASE:",white);
     frf_post_count(x+126,y+221,frf_usb_host_phase,cyan);
     frf_post_text(x+168,y+221,"PORTS:",white);
