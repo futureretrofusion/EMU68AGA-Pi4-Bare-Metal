@@ -914,11 +914,72 @@ static uintptr_t root_port_reg(uint32_t n)
     if (off>g_reg_bytes || g_reg_bytes-off<4u) return 0u;
     return g_mmio+(uintptr_t)off;
 }
+/* R105: Use the xHCI Supported Protocol extended capabilities rather than
+ * assuming a fixed VL805 root-port number. A normal Pi4 exposes USB2 and
+ * USB3 root ports simultaneously. All boot HID is routed through the USB2
+ * companion hub, so never select a SuperSpeed root merely because it
+ * reported CCS earlier.
+ *
+ * xECP is HCCPARAMS1[31:16] in DWORD units; protocol capability ID=2 has
+ * major revision in header bits 31:24 and Compatible Port Offset/Count in
+ * DWORD2 bytes 0/1. Bounds limit an invalid pointer to 32 reads. */
+volatile uint32_t frf_r105_usb2_root_mask,frf_r105_usb3_root_mask;
+volatile uint32_t frf_r105_idle_retries,frf_r105_idle_success;
+static uint32_t g_r105_last_hub_mask;
+static void r105_protocol_root_masks(uint32_t ports)
+{
+    frf_r105_usb2_root_mask=frf_r105_usb3_root_mask=0u;
+    if(!g_mmio || !g_reg_bytes || !ports)return;
+    uint32_t hcc=host_read32(g_mmio+0x10u);
+    uint32_t cp=(hcc>>16)&0xffffu;
+    for(uint32_t iter=0;iter<32u && cp;iter++) {
+        uint32_t off=cp*4u;
+        if(off>g_reg_bytes || g_reg_bytes-off<12u)break;
+        uint32_t hdr=host_read32(g_mmio+off);
+        uint32_t next=(hdr>>8)&0xffu;
+        if((hdr&0xffu)==2u) {
+            uint32_t major=(hdr>>24)&0xffu;
+            uint32_t span=host_read32(g_mmio+off+8u);
+            uint32_t first=span&0xffu, num=(span>>8)&0xffu;
+            for(uint32_t j=0;j<num && j<32u;j++) {
+                uint32_t p=first+j;
+                if(p<1u || p>ports || p>32u)continue;
+                if(major==2u)frf_r105_usb2_root_mask|=1u<<(p-1u);
+                else if(major>=3u)frf_r105_usb3_root_mask|=1u<<(p-1u);
+            }
+        }
+        if(!next)break;
+        if(cp>0xffffu-next)break;
+        cp+=next;
+    }
+}
+static int r105_usb2_root_eligible(uint32_t n,uint32_t speed)
+{
+    if(n<1u || n>32u || speed<1u || speed>3u)return 0;
+    uint32_t mask=frf_r105_usb2_root_mask;
+    return !mask || (mask&(1u<<(n-1u)))!=0u;
+}
+static int r105_usb2_root_attached(void)
+{
+    const volatile struct FRFXHCIProbeInfo *p=frf_xhci_probe_info();
+    uint32_t count=p?p->max_ports:0u;
+    if(count>32u)count=32u;
+    for(uint32_t n=1u;n<=count;n++) {
+        uintptr_t reg=root_port_reg(n);
+        if(!reg)continue;
+        uint32_t v=host_read32(reg),speed=(v&XHCI_PORT_SPEED_MASK)>>XHCI_PORT_SPEED_SHIFT;
+        if((v&XHCI_PORT_CCS)&&r105_usb2_root_eligible(n,speed))return 1;
+    }
+    return 0;
+}
 static int port_reset(void)
 {
     const volatile struct FRFXHCIProbeInfo *probe=frf_xhci_probe_info();
     uint32_t count=probe?probe->max_ports:0u;
     if (count>32u) count=32u;
+    r105_protocol_root_masks(count);
+    kprintf("[R105-PORT] roots=%u USB2=%08x USB3=%08x\n",
+            count,frf_r105_usb2_root_mask,frf_r105_usb3_root_mask);
     frf_usb_root_port_max=count;
     frf_usb_root_port_selected=0u;
     frf_usb_root_port_status=0u;
@@ -926,7 +987,9 @@ static int port_reset(void)
     frf_usb_host_phase=0x09u; /* examining all root ports */
     uint32_t selected=0u, p=0u, selected_rank=0u;
     uint64_t stable_deadline=0u;
-    const uint64_t deadline=host_deadline_ms(1500u);
+    /* USB2 hub can come out of reset after a SuperSpeed device. Wait
+     * for it instead of committing early to a USB3/low-speed root. */
+    const uint64_t deadline=host_deadline_ms(2500u);
     while (!host_timed_out(deadline)) {
         for (uint32_t n=1u;n<=count;n++) {
             uintptr_t reg=root_port_reg(n);
@@ -938,17 +1001,14 @@ static int port_reset(void)
             }
             if (!(v&XHCI_PORT_CCS)) continue;
             uint32_t speed=(v&XHCI_PORT_SPEED_MASK)>>XHCI_PORT_SPEED_SHIFT;
-            /* R81: VL805 has USB3 and USB2 root ports. The four Pi4 USB-A
-             * sockets present ordinary boot HID on the USB2 companion hub.
-             * Prefer a connected high-speed root (speed ID 3) over the first
-             * SuperSpeed (ID >=4) root, which may have no USB2 children.
-             * Low/full speed devices remain valid fallback candidates. */
-            uint32_t rank=(speed==3u)?3u:
-                          ((speed==1u||speed==2u)?2u:
-                          (speed>=4u?1u:0u));
+            /* R105: Only USB2 root ports are useful for the Pi4's
+             * internal USB2 hub. Do not strand all HID by choosing
+             * an attached SuperSpeed drive on a normal four-port Pi4. */
+            if(!r105_usb2_root_eligible(n,speed))continue;
+            uint32_t rank=(speed==3u)?3u:2u;
             if(!selected || rank>selected_rank) {
                 selected=n; selected_rank=rank;
-                stable_deadline=host_deadline_ms(rank>=3u?100u:500u);
+                stable_deadline=host_deadline_ms(rank==3u?100u:500u);
                 p=v;
                 kprintf("[R81-USB2] candidate root%u speed%u rank%u PORTSC=%08x\n",
                         n,speed,rank,v);
@@ -956,7 +1016,9 @@ static int port_reset(void)
                 p=v;
             }
         }
-        if (selected && host_timed_out(stable_deadline)) break;
+        /* USB2 high-speed root wins early; FS/LS fallback only once
+         * the entire discovery window has elapsed. */
+        if (selected && selected_rank==3u && host_timed_out(stable_deadline)) break;
         __asm__ volatile("yield");
     }
     if (!selected || !(p&XHCI_PORT_CCS) ||
@@ -1462,10 +1524,10 @@ int frf_xhci_host_hid_poll(void *data, uint32_t length, uint32_t *actual)
     return 1;
 }
 
-int frf_xhci_host_hid_scan_cpu1(void)
+/* Direct-root USB2 HID fallback, reused by boot and late-attach paths. */
+static void r105_register_root_native_hid(void)
 {
-    int ok=host_scan_cpu1();
-    if(ok && !g_native_count && g_hid_ready &&
+    if(!g_native_count && g_hid_ready &&
        g_host.interface_class==USB_CLASS_HID) {
         struct NativeHID *h=&g_native_hid[0];
         h->slot=g_slot_id; h->protocol=g_host.interface_protocol;
@@ -1476,6 +1538,11 @@ int frf_xhci_host_hid_scan_cpu1(void)
         g_native_count=1u;
     }
     frf_r83_hid_count=g_native_count;
+}
+int frf_xhci_host_hid_scan_cpu1(void)
+{
+    int ok=host_scan_cpu1();
+    if(ok)r105_register_root_native_hid();
     return ok;
 }
 
@@ -3268,6 +3335,60 @@ static int hub_scan_children(void)
     return 1;
 }
 
+/* R105 idle recovery. Called only from CPU1 when no native HID transfer
+ * can be pending. Never halt/reset the entire VL805 after successful RUN:
+ * recovery uses a late USB2 root-port reset or one empty USB2 hub re-scan.
+ * A live HID worker must not call this function. */
+int frf_xhci_host_r105_idle_retry_cpu1(void)
+{
+    if(host_cpu()!=1u || !g_host.owned || g_native_count)return 0;
+    ++frf_r105_idle_retries;
+
+    if(g_root_hub_slot && g_hub_num_ports && !g_host.msc_ready) {
+        /* No live HID and no active mass storage. Re-enumerate the hub
+         * only when the connection mask gains a port. Do not churn live
+         * endpoints or repeatedly reset an unresponsive USB peripheral. */
+        uint16_t st=0u,ch=0u;
+        uint32_t connected=0u;
+        for(uint32_t port=1u;port<=g_hub_num_ports;port++) {
+            if(hub_port_status(port,&st,&ch) &&
+               (st&USB_HUB_PORT_CONNECTION))
+                connected|=1u<<port;
+        }
+        uint32_t new_ports=connected&~g_r105_last_hub_mask;
+        g_r105_last_hub_mask=connected; /* rearm after unplug/replug */
+        if(new_ports) {
+            kprintf("[R105-USB2] late USB2 hub connect new=%04x all=%04x\n",
+                    new_ports,connected);
+            if(hub_scan_children() && g_native_count) {
+                g_host.error=FRFXHCI_HE_OK;
+                ++frf_r105_idle_success;
+                return 1;
+            }
+        }
+        return 0;
+    }
+    /* Nothing attached at the root when the controller was first
+     * enumerated. Poll PORTSC without xHCI reset, and only when a
+     * supported USB2 root port reports a connection attempt attach. */
+    if(g_slot_id || !r105_usb2_root_attached())return 0;
+    if(!port_reset() || !address_device() || !parse_and_configure()) {
+        kprintf("[R105-USB2] late root attach failed err%u\n",g_host.error);
+        return 0;
+    }
+    if((g_host.device_class==USB_CLASS_HUB ||
+        g_host.interface_class==USB_CLASS_HUB) && !hub_scan_children())
+        return 0;
+    r105_register_root_native_hid();
+    if(g_native_count) {
+        g_host.error=FRFXHCI_HE_OK;
+        ++frf_r105_idle_success;
+        kprintf("[R105-USB2] recovered HID without HCRST\n");
+        return 1;
+    }
+    return 0;
+}
+
 uint32_t frf_xhci_host_device_count(void)
 {
     return g_hub_device_count;
@@ -3529,6 +3650,7 @@ static int host_scan_cpu1(void)
     g_slot_id = 0;
     g_bulk_in_dci = g_bulk_out_dci = 0;
     hub_zero_devices();
+    g_r105_last_hub_mask=0u;
     g_route_string = 0U; g_root_hub_port = 1U; g_selected_root_port=1U;
     g_slot_hub = g_slot_num_ports = 0U;
     g_tt_hub_slot = g_tt_port = g_tt_think_time = 0U;

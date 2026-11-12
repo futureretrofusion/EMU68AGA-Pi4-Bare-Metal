@@ -94,6 +94,7 @@ int frf_xhci_host_request_load_file(uint32_t index, void *dst,
 
 const volatile struct FRFXHCIHostInfo *frf_xhci_host_info(void);
 int frf_xhci_host_hid_scan_cpu1(void);
+int frf_xhci_host_r105_idle_retry_cpu1(void); /* CPU1-only, empty USB2 hub or late root */
 int frf_xhci_host_hid_ready(void);
 int frf_xhci_host_hid_poll(void *data, uint32_t length, uint32_t *actual);
 /* R80 ARM CPU1 native multi-HID service: up to four concurrently polled

@@ -163,7 +163,12 @@ void frf_pi4_xhci_hid_main(void)
      * CPU0 boot proceeds, CPU1 parks, no reboot and no repeat reset. */
     __atomic_store_n(&frf_usb_r54_attempts,1u,__ATOMIC_RELEASE);
     frf_sdlog_xhci_stage=1u;
+    extern volatile uint32_t frf_r105_usb_state;
+    frf_r105_usb_state=1u; /* xHCI / USB2 root discovery */
     int scanned=frf_xhci_host_hid_scan_cpu1();
+r105_mount_ready:
+    /* This label is only reached after no-HID idle polling finds an
+     * endpoint. All HID metadata is reinitialized with the new devices. */
     uint32_t count=scanned?frf_xhci_host_native_count():0u;
     unsigned keyboard=0u, mouse=0u, gamepad=0u;
     uint8_t pad_ready[4]={0};
@@ -252,15 +257,36 @@ void frf_pi4_xhci_hid_main(void)
     frf_xhci_host_diag_snapshot_cpu1();
     __atomic_store_n(&frf_r58_hid_ready,(keyboard+mouse+gamepad)?1u:0u,__ATOMIC_RELEASE);
     __atomic_store_n(&frf_usb_mouse_present,mouse?1u:0u,__ATOMIC_RELEASE);
+    /* boot_ready means CPU1 completed its initial attempt, not USB input.
+     * R105 POST uses an independent state to avoid a misleading ONLINE. */
+    frf_r105_usb_state=(keyboard+mouse+gamepad)?2u:
+                       (!scanned?4u:3u);
     frf_post_usb_devices(keyboard,mouse,gamepad,0u);
     __atomic_store_n(&frf_usb_boot_ready,1u,__ATOMIC_RELEASE);
     __asm__ volatile("dmb ish; sev" ::: "memory");
     if(!count || !(keyboard+mouse+gamepad)) {
         frf_sdlog_xhci_stage=0x80000080u;
-        kprintf("[R80-USB] no supported native HID endpoint; park CPU1\n");
-        for (;;) __asm__ volatile("wfe");
+        kprintf("[R105-USB2] no native HID; USB2 idle monitor active (no HCRST)\n");
+        /* R79 safety invariant: never RESET the controller again after its
+         * initial boot takeover. R105 only checks root PORTSC and, if
+         * initially empty, the powered USB2 hub's port-status bits.
+         * Recovery is CPU1-local and bounded to one attempt every 2 sec. */
+        for(;;) {
+            uint64_t start_cnt=0u,now_cnt=0u;
+            __asm__ volatile("mrs %0, cntpct_el0" : "=r"(start_cnt));
+            do {
+                __asm__ volatile("yield");
+                __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now_cnt));
+            } while(now_cnt-start_cnt<boot_hz*2u);
+            if(frf_xhci_host_r105_idle_retry_cpu1()) {
+                kprintf("[R105-USB2] recovered native HID, mounting reports\n");
+                scanned=1;
+                goto r105_mount_ready;
+            }
+        }
     }
     frf_sdlog_xhci_stage=60u;
+    frf_sdlog_xhci_error=0u; /* a late recovery supersedes the boot error */
     frf_boot_stage(10);
     kprintf("[R80-USB] ARM USB: keyboard=%u mouse=%u gamepad=%u slots=%u\n",
             keyboard,mouse,gamepad,count);

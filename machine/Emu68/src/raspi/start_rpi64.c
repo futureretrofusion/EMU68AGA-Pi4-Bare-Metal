@@ -252,6 +252,9 @@ static void draw_logo_rgb(uint32_t start_x, uint32_t start_y, uint32_t scale)
  * AGA framebuffer is ever modified. Original RLE splash is untouched.
  * The firmware-backed framebuffer persists until native HDMI takes over. */
 extern volatile uint8_t frf_usb_boot_ready;
+extern volatile uint32_t frf_r105_usb_state;
+extern volatile uint32_t frf_usb_root_port_selected;
+extern volatile uint32_t frf_sdlog_xhci_error;
 extern volatile uint32_t frf_r76_usb_keyboard_count;
 extern volatile uint32_t frf_r76_usb_mouse_count;
 extern volatile uint32_t frf_r76_usb_gamepad_count;
@@ -324,8 +327,14 @@ static void frf_post_draw(void)
     const uint32_t hubs=frf_r97_hub_count;
     const uint32_t ready=__atomic_load_n(&frf_usb_boot_ready,__ATOMIC_ACQUIRE);
     const uint32_t stage=__atomic_load_n(&frf_post_stage,__ATOMIC_ACQUIRE);
+    const uint32_t usb_state=__atomic_load_n(&frf_r105_usb_state,__ATOMIC_ACQUIRE);
+    const int usb_live=usb_state==2u;
+    const char *usb_label=usb_live?"HID READY":
+                           usb_state==4u?"HOST ERROR":
+                           usb_state==3u?(frf_usb_root_port_selected?
+                                           "WAIT HID":"WAIT USB2"):"STARTING";
     frf_post_text(x+12,y+101,"USB HOST:",white);
-    frf_post_text(x+156,y+101,ready?"ONLINE":"STARTING",ready?green:yellow);
+    frf_post_text(x+156,y+101,usb_label,usb_live?green:yellow);
     frf_post_text(x+12,y+121,"KEYBOARD:",white);
     frf_post_count(x+110,y+121,k,k?green:yellow);
     frf_post_text(x+168,y+121,"MOUSE:",white);
@@ -336,10 +345,19 @@ static void frf_post_draw(void)
     frf_post_count(x+250,y+141,hid,hid?green:yellow);
     frf_post_text(x+12,y+161,"EXT HUBS:",white);
     frf_post_count(x+110,y+161,hubs,hubs?cyan:yellow);
+    frf_post_text(x+168,y+161,"USB2 ROOT:",white);
+    frf_post_count(x+270,y+161,frf_usb_root_port_selected,
+                   frf_usb_root_port_selected?green:yellow);
     frf_post_text(x+12,y+181,"BOOT STAGE:",white);
     frf_post_count(x+126,y+181,stage,cyan);
+    frf_post_text(x+168,y+181,"XHCI ERR:",white);
+    frf_post_count(x+270,y+181,frf_sdlog_xhci_error,
+                   frf_sdlog_xhci_error?yellow:green);
     frf_post_text(x+12,y+201,"STATUS:",white);
-    frf_post_text(x+110,y+201,ready?"USB SCAN DONE":"BOOTING",ready?green:cyan);
+    frf_post_text(x+110,y+201,usb_live?"USB INPUT OK":
+                   usb_state==4u?"HOST FAILED":
+                   ready?"NO HID - RETRY":"BOOTING",
+                   usb_live?green:yellow);
     __asm__ volatile("dsb ishst" ::: "memory");
 }
 void frf_boot_post_devices(void)

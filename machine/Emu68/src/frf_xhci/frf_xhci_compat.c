@@ -3,6 +3,9 @@
 #include "frf_usb_boot.h"
 volatile uint8_t frf_usb_host_start_allowed;
 volatile uint8_t frf_usb_boot_ready;
+/* R105: distinguish USB host scanning, working HID, idle and host failure.
+ * 0=starting 1=scanning 2=HID live 3=waiting USB2 4=host error */
+volatile uint32_t frf_r105_usb_state;
 volatile uint8_t frf_usb_mouse_present;
 volatile uint8_t frf_usb_mouse_seen;
 volatile uint8_t frf_usb_mouse_buttons;
