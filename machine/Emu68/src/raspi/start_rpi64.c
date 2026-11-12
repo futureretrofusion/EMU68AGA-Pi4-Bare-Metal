@@ -257,6 +257,13 @@ extern volatile uint32_t frf_r76_usb_mouse_count;
 extern volatile uint32_t frf_r76_usb_gamepad_count;
 extern volatile uint32_t frf_r83_hid_count;
 extern volatile uint32_t frf_r97_hub_count;
+extern volatile uint32_t frf_usb_root_port_max;
+extern volatile uint32_t frf_usb_root_port_selected;
+extern volatile uint32_t frf_usb_root_port_status;
+extern volatile uint32_t frf_usb_port_status_first8[8];
+extern volatile uint32_t frf_usb_host_phase;
+extern volatile uint32_t frf_sdlog_xhci_stage;
+extern volatile uint32_t frf_sdlog_xhci_error;
 static volatile unsigned frf_post_stage = 0u;
 static volatile unsigned frf_post_active = 0u;
 static volatile unsigned char frf_post_lock = 0u;
@@ -297,14 +304,18 @@ static void frf_post_count(int x,int y,uint32_t v,uint16_t rgb)
     frf_post_char(x,y,hex[(v>>4u)&15u],rgb);
     frf_post_char(x+8,y,hex[v&15u],rgb);
 }
+static void frf_post_hex32(int x,int y,uint32_t v,uint16_t rgb)
+{
+    const char hex[]="0123456789ABCDEF";
+    for(unsigned i=0;i<8u;i++)
+        frf_post_char(x+(int)i*8,y,hex[(v>>((7u-i)*4u))&15u],rgb);
+}
 static void frf_post_draw(void)
 {
-    /* With two version lines the POST occupies 236px plus 18px margin. */
+    /* R107: diagnostics-only expansion; no VL805 register writes. */
     if(!frf_post_active||!framebuffer||!pitch||fb_width<360u||
-       fb_height<254u)return;
-    /* Top right, but outside the 75%-width central splash at 1080p.
-       320x236 at 720p and up. A fixed pixel font keeps HDMI crisp. */
-    const int w=320,h=236,x=(int)fb_width-w-18,y=18;
+       fb_height<334u)return;
+    const int w=320,h=316,x=(int)fb_width-w-18,y=18;
     const uint16_t white=0xffffu,cyan=0x07ffu,green=0x07e0u,
                    yellow=0xffc0u,grey=0x8410u;
     frf_post_box(x,y,w,h,0x0000u);
@@ -324,8 +335,13 @@ static void frf_post_draw(void)
     const uint32_t hubs=frf_r97_hub_count;
     const uint32_t ready=__atomic_load_n(&frf_usb_boot_ready,__ATOMIC_ACQUIRE);
     const uint32_t stage=__atomic_load_n(&frf_post_stage,__ATOMIC_ACQUIRE);
+    const uint32_t host_error=__atomic_load_n(&frf_sdlog_xhci_error,__ATOMIC_ACQUIRE);
+    const uint32_t host_stage=__atomic_load_n(&frf_sdlog_xhci_stage,__ATOMIC_ACQUIRE);
+    const int live=(k+m+g)!=0u && hid!=0u;
+    const int failed=(host_stage&0x80000000u)!=0u && host_error!=0u;
     frf_post_text(x+12,y+101,"USB HOST:",white);
-    frf_post_text(x+156,y+101,ready?"ONLINE":"STARTING",ready?green:yellow);
+    frf_post_text(x+156,y+101,live?"HID READY":failed?"HOST ERROR":
+                  ready?"NO HID":"STARTING",live?green:yellow);
     frf_post_text(x+12,y+121,"KEYBOARD:",white);
     frf_post_count(x+110,y+121,k,k?green:yellow);
     frf_post_text(x+168,y+121,"MOUSE:",white);
@@ -336,10 +352,25 @@ static void frf_post_draw(void)
     frf_post_count(x+250,y+141,hid,hid?green:yellow);
     frf_post_text(x+12,y+161,"EXT HUBS:",white);
     frf_post_count(x+110,y+161,hubs,hubs?cyan:yellow);
+    frf_post_text(x+168,y+161,"ROOT:",white);
+    frf_post_count(x+270,y+161,frf_usb_root_port_selected,cyan);
     frf_post_text(x+12,y+181,"BOOT STAGE:",white);
     frf_post_count(x+126,y+181,stage,cyan);
+    frf_post_text(x+168,y+181,"XHCI ERR:",white);
+    frf_post_count(x+270,y+181,host_error,host_error?yellow:green);
     frf_post_text(x+12,y+201,"STATUS:",white);
-    frf_post_text(x+110,y+201,ready?"USB SCAN DONE":"BOOTING",ready?green:cyan);
+    frf_post_text(x+110,y+201,live?"USB INPUT OK":failed?"USB HOST FAILED":
+                  ready?"ZERO HID":"BOOTING",live?green:yellow);
+    frf_post_text(x+12,y+221,"HOST PHASE:",white);
+    frf_post_count(x+126,y+221,frf_usb_host_phase,cyan);
+    frf_post_text(x+168,y+221,"PORTS:",white);
+    frf_post_count(x+270,y+221,frf_usb_root_port_max,cyan);
+    frf_post_text(x+12,y+241,"PORT1:",white);
+    frf_post_hex32(x+110,y+241,frf_usb_port_status_first8[0],cyan);
+    frf_post_text(x+12,y+261,"SELECTED:",white);
+    frf_post_hex32(x+110,y+261,frf_usb_root_port_status,cyan);
+    frf_post_text(x+12,y+281,"SDLOG:",white);
+    frf_post_hex32(x+110,y+281,host_stage,host_error?yellow:cyan);
     __asm__ volatile("dsb ishst" ::: "memory");
 }
 void frf_boot_post_devices(void)
