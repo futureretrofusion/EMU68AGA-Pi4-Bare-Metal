@@ -120,6 +120,9 @@ int frf_xhci_host_control(uint8_t request_type, uint8_t request,
                           uint16_t value, uint16_t index,
                           void *data, uint16_t length, int direction_in,
                           uint32_t *actual);
+/* R111: registered boot-present mass-storage slot survives HID enumeration.
+ * Exclusively CPU1: one BOT transport (no hotplug or writes). */
+uint32_t frf_xhci_host_msc_slot(void);
 int frf_xhci_host_bulk_in(void *data, uint32_t length, uint32_t *actual);
 int frf_xhci_host_bulk_out(const void *data, uint32_t length, uint32_t *actual);
 

@@ -403,7 +403,11 @@ endif()
 
 # R76: restore Pi4 native VL805 host on CPU1 without the older Pi3 USB gate.
 # Not enabled for Pi3 and does not touch the known-good R75 source tree.
+option(FRF_PI4_USB_MASS_RO "Pi4 xHCI boot-present read-only MSC + Z2 usbmass.device mailbox" OFF)
 option(FRF_PI4_XHCI_HID "Pi4 standalone VL805 xHCI native HID worker" OFF)
+if(FRF_PI4_USB_MASS_RO AND (NOT FRF_PI4_XHCI_HID OR FRF_USB_HOST OR AGA_PI3))
+    message(FATAL_ERROR "Pi4 R111 USB mass requires native Pi4 xHCI and forbids Pi3 DWC2")
+endif()
 if(FRF_PI4_XHCI_HID)
     if(AGA_PI3 OR FRF_USB_HOST OR NOT "${TARGET}" STREQUAL "raspi64")
         message(FATAL_ERROR "R76 xHCI only supports Pi4 virtual AGA, without Pi3 DWC2")
@@ -416,6 +420,13 @@ if(FRF_PI4_XHCI_HID)
         ${CMAKE_SOURCE_DIR}/src/frf_xhci/frf_native_usb_input.c
         ${CMAKE_SOURCE_DIR}/src/frf_xhci/frf_native_usb_pad.c
         ${CMAKE_SOURCE_DIR}/src/frf_timebase.c)
+    if(FRF_PI4_USB_MASS_RO)
+        target_sources(Emu68.elf PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/frf_usb/frf_usb_mass_board.c
+            ${CMAKE_SOURCE_DIR}/src/frf_xhci/frf_pi4_usb_mass.c)
+        target_include_directories(Emu68.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/frf_usb)
+        target_compile_definitions(Emu68.elf PRIVATE FRF_PI4_USB_MASS_RO=1)
+    endif()
     target_include_directories(Emu68.elf PRIVATE ${CMAKE_SOURCE_DIR}/include/frf_xhci)
     target_compile_definitions(Emu68.elf PRIVATE FRF_PI4_XHCI_HID=1)
 endif()

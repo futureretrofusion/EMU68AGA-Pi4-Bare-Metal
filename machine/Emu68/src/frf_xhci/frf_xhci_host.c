@@ -279,6 +279,9 @@ static uint32_t g_cap_length;
 static uint32_t g_port_speed;
 static uint32_t g_slot_id;
 static uint32_t g_ep0_mps;
+/* R111: retain dedicated MSC slot after enumeration restores root EP0.
+ * No xHCI controller reset or resource reuse while HID is active. */
+static uint32_t g_frf_msc_slot;
 static uint32_t g_bulk_in_dci;
 static uint32_t g_bulk_out_dci;
 static uint32_t g_hid_in_dci, g_hid_iface, g_hid_mps, g_hid_ready;
@@ -2646,6 +2649,21 @@ static int r97_scan_hub(struct R97HubState *hub)
             r97_select_hub(hub);
             continue;
         }
+#if defined(FRF_PI4_USB_MASS_RO)
+        if(!g_frf_msc_slot && d->mass_storage && ie && oe && im && om &&
+           g_r97_next_bank<R97_CHILD_CONTEXT_BANKS) {
+            if(configure_bulk_endpoints(ie,oe,im,om) &&
+               frf_xhci_host_control(0x00u,USB_REQ_SET_CONFIGURATION,
+                                  (uint16_t)cfg,0u,NULL,0u,0,NULL)) {
+                g_frf_msc_slot=g_slot_id;
+                ++g_r97_next_bank;
+                kprintf("[R111-MSC] ext hub port%u slot%u VID:PID=%04x:%04x RO\n",
+                        port,g_frf_msc_slot,d->vid,d->pid);
+                r97_select_hub(hub);
+                continue;
+            }
+        }
+#endif
         if(r121_boot_hid_count()>=2u &&
            r121_configure_composite(cfg,d->vid,d->pid)) {
             frf_r97_ext_live_mask|=1u<<port;
@@ -3080,8 +3098,10 @@ static int hub_scan_children(void)
         kprintf("[R89-USB] scanned port%u slot%u speed%u vid=%04x pid=%04x protocol=%u HID-ep=%u\n",
             port,d->slot_id,d->speed_id,d->vid,d->pid,
             d->interface_protocol,he);
+#if !defined(FRF_PI4_USB_MASS_RO)
         if(!boot_port && d->mass_storage && ie && oe && im && om)
             boot_port=port;
+#endif
         if(port<=4u) {
             frf_r89_native_protocol[port-1u]=d->interface_protocol;
             frf_r89_native_slot[port-1u]=g_slot_id;
@@ -3117,6 +3137,24 @@ static int hub_scan_children(void)
             ++g_hub_device_count;
             continue;
         }
+#if defined(FRF_PI4_USB_MASS_RO)
+        /* Configure one MSC child inline, retaining its permanent context.
+         * No USB reset/readdress after other keyboard/mouse slots are live. */
+        if(!g_frf_msc_slot && d->mass_storage && ie && oe && im && om &&
+           g_r97_next_bank<R97_CHILD_CONTEXT_BANKS) {
+            if(configure_bulk_endpoints(ie,oe,im,om) &&
+               frf_xhci_host_control(0x00u,USB_REQ_SET_CONFIGURATION,
+                               (uint16_t)cfg,0u,NULL,0u,0,NULL)) {
+                g_frf_msc_slot=g_slot_id;
+                ++g_r97_next_bank;
+                kprintf("[R111-MSC] hub port%u slot%u VID:PID=%04x:%04x bulk %u/%u RO\n",
+                        port,g_frf_msc_slot,d->vid,d->pid,ie,oe);
+                ++g_hub_device_count;
+                continue;
+            }
+            kprintf("[R111-MSC] hub port%u BOT configuration failed\n",port);
+        }
+#endif
         if(r121_boot_hid_count()>=2u &&
            r121_configure_composite(cfg,d->vid,d->pid)) {
             frf_r89_native_candidate_mask|=1u<<port;
@@ -3528,6 +3566,7 @@ static int host_scan_cpu1(void)
     frf_usb_boot_clear();
     g_slot_id = 0;
     g_bulk_in_dci = g_bulk_out_dci = 0;
+    g_frf_msc_slot=0u;
     hub_zero_devices();
     g_route_string = 0U; g_root_hub_port = 1U; g_selected_root_port=1U;
     g_slot_hub = g_slot_num_ports = 0U;
@@ -3572,6 +3611,10 @@ static int host_scan_cpu1(void)
         frf_services_usb_backend_state(FRFS_USB_BACKEND_ERROR);
         return 0;
     }
+#if defined(FRF_PI4_USB_MASS_RO)
+    /* Root-attached MSC was configured by parse_and_configure. */
+    if (g_host.msc_ready && !g_frf_msc_slot) g_frf_msc_slot=g_slot_id;
+#endif
     frf_sdlog_xhci_stage = 50u;
     frf_usb_host_phase=0x40u;
     if ((g_host.device_class == USB_CLASS_HUB || g_host.interface_class == USB_CLASS_HUB) && !hub_scan_children()) {
@@ -3628,17 +3671,26 @@ static int bulk_transfer(struct XHCIRing *ring, uint32_t dci, void *data,
     return 1;
 }
 
+uint32_t frf_xhci_host_msc_slot(void) { return g_frf_msc_slot; }
 int frf_xhci_host_bulk_in(void *data, uint32_t length, uint32_t *actual)
 {
-    if (!g_host.msc_ready)
-        return 0;
+#if defined(FRF_PI4_USB_MASS_RO)
+    if (!g_frf_msc_slot) return 0;
+    g_slot_id=g_frf_msc_slot;
+#else
+    if (!g_host.msc_ready) return 0;
+#endif
     return bulk_transfer(&g_bulk_in_ring, g_bulk_in_dci, data, length, 1, actual);
 }
 
 int frf_xhci_host_bulk_out(const void *data, uint32_t length, uint32_t *actual)
 {
-    if (!g_host.msc_ready)
-        return 0;
+#if defined(FRF_PI4_USB_MASS_RO)
+    if (!g_frf_msc_slot) return 0;
+    g_slot_id=g_frf_msc_slot;
+#else
+    if (!g_host.msc_ready) return 0;
+#endif
     return bulk_transfer(&g_bulk_out_ring, g_bulk_out_dci, (void *)(uintptr_t)data,
                          length, 0, actual);
 }

@@ -140,6 +140,11 @@ volatile uint32_t frf_r58_hid_buttons,frf_r58_hid_ready;
 extern void frf_xhci_host_diag_snapshot_cpu1(void);
 
 
+#if defined(FRF_PI4_USB_MASS_RO)
+extern void frf_pi4_um_init(void);
+extern void frf_pi4_um_service(void);
+extern uint32_t frf_pi4_um_capacity(void);
+#endif
 void frf_pi4_xhci_hid_main(void)
 {
     while (!__atomic_load_n(&frf_usb_host_start_allowed, __ATOMIC_ACQUIRE))
@@ -249,13 +254,24 @@ void frf_pi4_xhci_hid_main(void)
                    pad_ready[i]?1u:0u,frf_r91_pad_status);
         }
     }
+#if defined(FRF_PI4_USB_MASS_RO)
+    frf_pi4_um_init();
+#endif
     frf_xhci_host_diag_snapshot_cpu1();
     __atomic_store_n(&frf_r58_hid_ready,(keyboard+mouse+gamepad)?1u:0u,__ATOMIC_RELEASE);
     __atomic_store_n(&frf_usb_mouse_present,mouse?1u:0u,__ATOMIC_RELEASE);
+#if defined(FRF_PI4_USB_MASS_RO)
+    frf_post_usb_devices(keyboard,mouse,gamepad,frf_pi4_um_capacity()?1u:0u);
+#else
     frf_post_usb_devices(keyboard,mouse,gamepad,0u);
+#endif
     __atomic_store_n(&frf_usb_boot_ready,1u,__ATOMIC_RELEASE);
     __asm__ volatile("dmb ish; sev" ::: "memory");
+#if defined(FRF_PI4_USB_MASS_RO)
+    if((!count || !(keyboard+mouse+gamepad)) && !frf_xhci_host_msc_slot()) {
+#else
     if(!count || !(keyboard+mouse+gamepad)) {
+#endif
         frf_sdlog_xhci_stage=0x80000080u;
         kprintf("[R80-USB] no supported native HID endpoint; park CPU1\n");
         for (;;) __asm__ volatile("wfe");
@@ -275,6 +291,9 @@ void frf_pi4_xhci_hid_main(void)
     __asm__ volatile("mrs %0, cntpct_el0":"=r"(log_now));
     log_next=log_now+log_hz*5u;
     for(;;) {
+#if defined(FRF_PI4_USB_MASS_RO)
+        frf_pi4_um_service();
+#endif
         /* The Pi3 host reboot uses aga_reboot(0); here this path is
            CPU1-only and works whether the guest is in AGS, Workbench
            or a WHDLoad game.  No 68k keyboard reset injection. */
