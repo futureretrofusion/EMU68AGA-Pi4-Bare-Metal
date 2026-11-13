@@ -53,6 +53,60 @@ extern uint32_t EPOCH;
 #include "cache.h"
 #include "intc.h"
 
+/* FRF Pi4 R110: AGA-STORM 1.121 native picture-control protocol.
+ * Standalone EMU68AGA keeps aga_mode=1; the legacy agaboot/sandbox handlers
+ * below deliberately require !aga_mode. CRT MASK already has an early
+ * standalone decode, but scanlines, zoom and other picture controls
+ * were accidentally left unreachable. Accept only display commands here;
+ * keep old sandbox, chipset and private commands behind their guard.
+ * Called inside AGA_TRAP_GUARD in BOTH exception write-handler variants. */
+#if defined(AGA_PISTORM) && defined(FRF_VIRTUAL_AGA)
+static int frf_pi4_agaboot_picture_write(uint64_t far, int size, uint64_t value)
+{
+    if (far != 0xDFF1F2u || size != 2) return 0;
+    uint32_t v = (uint16_t)value;
+    /* Selective 1%-precision scanline levels. Selector 0 PAL, 1 laced,
+     * 2 NTSC, 3 top/bottom. Bit 1 must be clear. */
+    if ((v & 0xFF02u) == 0x5000u) {
+        aga_video_scan_select((int)((v & 1u) | ((v >> 1) & 0x7eu))); return 1;
+    }
+    if ((v & 0xFF02u) == 0x5300u) {
+        aga_video_scan_value((int)((v & 1u) | ((v >> 1) & 0x7eu))); return 1;
+    }
+    if ((v & 0xFFF2u) == 0x5170u) {
+        aga_video_set_ntsc_scanlines((int)((v & 1u) | ((v >> 1) & 6u))); return 1;
+    }
+    if ((v & 0xFFF8u) == 0x5980u) { aga_video_set_scanlines((int)(v & 7u)); return 1; }
+    if ((v & 0xFFF8u) == 0x59E0u) { aga_video_set_laced_scanlines((int)(v & 7u)); return 1; }
+    /* Zoom, crop, look and position: retained independently of Pi3 code. */
+    if ((v & 0xFFC2u) == 0x58C0u) {
+        aga_video_cut_data((int)((v & 1u) | ((v >> 1) & 0x1eu))); return 1;
+    }
+    if ((v & 0xFFF2u) == 0x5870u) {
+        aga_video_cut_store((int)((v & 1u) | ((v >> 1) & 6u))); return 1;
+    }
+    if ((v & 0xFFF2u) == 0x5880u) {
+        aga_video_crop_screen((int)((v & 1u) | ((v >> 1) & 6u))); return 1;
+    }
+    if ((v & 0xFFF0u) == 0x5900u) {
+        aga_video_set_zoom((int)(v & 7u));
+        aga_video_set_sharp((int)((v >> 3) & 1u)); return 1;
+    }
+    if ((v & 0xFFFCu) == 0x5920u) { aga_video_set_look((int)(v & 3u)); return 1; }
+    if ((v & 0xFFFCu) == 0x5970u) { aga_video_set_scale((int)(v & 3u)); return 1; }
+    if ((v & 0xFF00u) == 0x5700u) { aga_video_set_pos_x((int8_t)(v & 0xffu)); return 1; }
+    if ((v & 0xFF00u) == 0x5600u) { aga_video_set_pos_y((int8_t)(v & 0xffu)); return 1; }
+    if ((v & 0xFFFEu) == 0x5930u) { aga_video_calibrate((int)(v & 1u)); return 1; }
+    if ((v & 0xFFF0u) == 0x59B0u) { aga_video_set_border(0, (int)(v & 15u)); return 1; }
+    if ((v & 0xFFF0u) == 0x59C0u) { aga_video_set_border(1, (int)(v & 15u)); return 1; }
+    if ((v & 0xFFFEu) == 0x59D0u) { aga_flickerfix((int)(v & 1u)); return 1; }
+    if ((v & 0xFFF8u) == 0x59F0u) { aga_brightness((int)(v & 7u)); return 1; }
+    if ((v & 0xFFFEu) == 0x5910u) { aga_video_standard((int)(v & 1u)); return 1; }
+    if ((v & 0xFFFEu) == 0x5890u) { aga_video_hdmi_sync((int)(v & 1u)); return 1; }
+    return 0;
+}
+#endif
+
 #define FULL_CONTEXT 0
 
 static const int REGMAP[32] = {
@@ -976,6 +1030,10 @@ int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
     }
 #endif
 #ifdef FRF_VIRTUAL_AGA
+    /* R110: accept native picture commands before the !aga_mode guard. */
+    if (frf_pi4_agaboot_picture_write(far, size, value)) return 1;
+#endif
+#ifdef FRF_VIRTUAL_AGA
     /* FRF v0.10.15 SYSTEMWIDE: the virtual AGA chipset is already the machine.
        Disable legacy agaboot/sandbox/private-register commands in machine mode.
        Real AGA $1E8-$1EE traffic must reach the chipset core unmodified. */
@@ -1580,6 +1638,10 @@ int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
         aga_video_set_scale((int)((value & 1u) | ((value >> 1) & 6u)));
         return 1;
     }
+#endif
+#ifdef FRF_VIRTUAL_AGA
+    /* R110: accept native picture commands before the !aga_mode guard. */
+    if (frf_pi4_agaboot_picture_write(far, size, value)) return 1;
 #endif
 #ifdef FRF_VIRTUAL_AGA
     /* FRF v0.10.15 SYSTEMWIDE: the virtual AGA chipset is already the machine.
