@@ -1181,11 +1181,29 @@ static uint32_t scan_plane(uint32_t o)
     dl_wr(o++, 0xc0000000UL | (uint32_t)(fb_phys + SCAN_OFF));
     dl_wr(o++, 0xdeadbeefUL);                                            /* PTRCTX0 (HVS) */
     dl_wr(o++, SCAN_W * 4);                                              /* pitch */
-    dl_wr(o++, ((((uint32_t)SCAN_W << 16) / dst_w) << 8) | PPF_SCALER | PPF_PHASE);   /* across */
-    for (int i = 0; i < 4; i++) dl_wr(o++, KERNEL_WORD);                /* any: the rows are flat */
+    /* R109 test: native Pi4 scanlines use a scaled RGBA overlay, while the
+     * already-working CRT mask is a separate unscaled (unity) overlay.
+     * The previous H-PPF/V-NONE Pi3-derived descriptor is a plausible
+     * compatibility problem on the Pi4 VC6 path; this experimental test
+     * matches the working picture plane's complete field layout:
+     * LBM, PPF0(horizontal), PPF1(vertical), scratch, four kernel pointers.
+     *
+     * There is one scanline scratch row per output row, so vertical PPF is
+     * 1:1. This is deliberately a hardware A/B test, NOT a claimed fix.
+     * Other valid VC6 layouts may omit vertical scaling, so do not replace
+     * the proven R107 kernel until actual HDMI comparison passes. */
+    /* BCM2711 HVS5 has 60K LBM words. The 800px native picture can use
+     * roughly 3200 words starting at zero (RGBA PPF vertical). Give this
+     * extra 8px-wide vertically-scaled scanline plane a separate aligned
+     * region to prevent two simultaneous planes aliasing LBM storage.
+     * VC4 fallback retains the older base: Pi3 has its own stable kernel. */
+    dl_wr(o++, hvs_gen == 4 ? 0u : 4096u);                               /* LBM base */
+    dl_wr(o++, ((((uint32_t)SCAN_W << 16) / dst_w) << 8) | PPF_SCALER | PPF_PHASE);
+    dl_wr(o++, (0x10000u << 8) | PPF_SCALER | PPF_PHASE);                 /* vertical 1:1 */
+    dl_wr(o++, 0);                                                        /* scratch */
+    for (int i = 0; i < 4; i++) dl_wr(o++, KERNEL_WORD);                /* H and V kernels */
     dl_wr(start, CTL_VALID | CTL_WORDS(o - start) | CTL_ALPHA_EXPAND | CTL_RGB_EXPAND
-                 | CTL_FORMAT(FMT_RGBA8888) | CTL_PIXEL_ORDER(hvs_gen == 4 ? ORDER_VC4_ARGB_BYTES : ORDER_BGRA)
-                 | CTL_SCL(SCL_H_PPF_V_NONE));
+                 | CTL_FORMAT(FMT_RGBA8888) | CTL_PIXEL_ORDER(hvs_gen == 4 ? ORDER_VC4_ARGB_BYTES : ORDER_BGRA));
     return o;
 }
 
