@@ -860,7 +860,12 @@ int aga_glue_init(uint8_t *chipram_va, uint32_t size, uint8_t *fb_va, uintptr_t 
         of_node_t *dn = dt_find_node("/emu68/diag");
         frf_hud = dn && dt_find_property(dn, "frf-hud");
     }
-#if defined(FRF_PI4_USB_HUD)
+#if defined(FRF_PI4_SUPPRESS_DIAGNOSTIC_POST)
+    /* R121 release-style boot: no permanent transport telemetry panel.
+     * Keep R117 rev1.1 USB logic and R113 HID sampling compiled, but
+     * do not advertise these internal counters as an HVS overlay. */
+    frf_hud=0;
+#elif defined(FRF_PI4_USB_HUD)
     /* R83 diagnostic kernel ONLY: persistent read-only numeric transport
      * status. No guest reads and no USB register writes from the video CPU.
      * Screenshot the 12 hex rows to identify the failing ARM native stage. */

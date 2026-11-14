@@ -1568,7 +1568,7 @@ static volatile int      ovl_on = 0;       /* always off at power-on */
 void aga_video_overlay(int row, uint32_t v) { if ((unsigned)row < OVL_ROWS) ovl_val[row] = v; }
 void aga_video_overlay_allow(int on)
 {
-#if defined(FRF_RELEASE_QUIET) && !defined(FRF_PI4_USB_HUD)
+#if defined(FRF_RELEASE_QUIET) && (!defined(FRF_PI4_USB_HUD) || defined(FRF_PI4_SUPPRESS_DIAGNOSTIC_POST))
     (void)on;
     ovl_allowed = 0;
     ovl_on = 0;
@@ -1579,7 +1579,7 @@ void aga_video_overlay_allow(int on)
 }
 void aga_video_overlay_enable(int on)
 {
-#if defined(FRF_RELEASE_QUIET) && !defined(FRF_PI4_USB_HUD)
+#if defined(FRF_RELEASE_QUIET) && (!defined(FRF_PI4_USB_HUD) || defined(FRF_PI4_SUPPRESS_DIAGNOSTIC_POST))
     (void)on;
     ovl_on = 0;
 #else
@@ -1768,7 +1768,9 @@ static void r94_post_panel(uint32_t *dst)
     ovl_fill(dst,x,y,w,h,R94_POST_BG);
     ovl_fill(dst,x,y,w,2,cyan);
     ovl_fill(dst,x,y+h-2,w,2,cyan);
-#if defined(FRF_PI4_LEGACY_REV_DIAG)
+#if defined(FRF_PI4_USB_MASS_RW)
+    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R121 USB RW",cyan);
+#elif defined(FRF_PI4_LEGACY_REV_DIAG)
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R117 LEGACY USB",cyan);
 #else
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R115 LIVE USB POST",cyan);
@@ -1849,9 +1851,15 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_text(dst,x+171,y+ym+16*9,"BOT ERR:",white);
     r94_post_hex(dst,x+259,y+ym+16*9,frf_pi4_um_last_bot_error(),2,amber);
     r94_post_text(dst,x+8,y+ym+16*10,"MSC TRANSPORT:",white);
+#if defined(FRF_PI4_USB_MASS_RW)
+    r94_post_text(dst,x+160,y+ym+16*10,dead?"FAIL CLOSED":ready?"RW READY":
+                  configured?"RW PROBING":seen?"CONFIG ERR":"NOT SEEN",
+                  dead?amber:ready?green:cyan);
+#else
     r94_post_text(dst,x+160,y+ym+16*10,dead?"FAIL CLOSED":ready?"READY":
                   configured?"PROBING":seen?"CONFIG ERR":"NOT SEEN",
                   dead?amber:ready?green:cyan);
+#endif
     r94_post_text(dst,x+8,y+ym+16*11,"CFG ERROR:",white);
     r94_post_hex(dst,x+110,y+ym+16*11,frf_r112_msc_config_errors,2,amber);
     r94_post_text(dst,x+168,y+ym+16*11,"BOT FAIL:",white);

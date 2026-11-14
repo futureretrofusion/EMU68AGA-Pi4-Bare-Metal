@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
- * FRF EMU68AGA Pi4 R115, native xHCI USB Mass Storage (BOT/SCSI READ10).
- * One boot-present 512-byte SCSI disk, exclusively ARM CPU1, read-only.
+ * FRF EMU68AGA Pi4 R121, native xHCI USB Mass Storage BOT read/write.
+ * One boot-present 512-byte SCSI disk, exclusively ARM CPU1.
+ * Writes are compiled ONLY with FRF_PI4_USB_MASS_RW; default read-only.
  *
  * Uses the proven FRUM v1 Pi3 virtual Zorro-II mailbox and AmigaOS driver.
  * The VL805 bulk transport is completely independent from Pi3 DWC2/USPi.
- * No writes, device resets, filesystem mutation, auto-format or hotplug.
+ * No firmware/USB resets, auto-format or hotplug.
+ * Writes use SCSI WRITE(10) and are fail-closed on errors.
  */
 #include <stdint.h>
 #include <support.h>
@@ -115,6 +117,66 @@ static int scsi_bot_in(const uint8_t *cdb,uint32_t cdb_len,
     return 1;
 }
 
+#if defined(FRF_PI4_USB_MASS_RW)
+/* USB BOT OUT: CBW(31 bytes), data OUT, CSW(13 bytes).
+ * Never DMA directly from the emulated 68k/Zorro shared memory. The
+ * caller stages bytes into our ARM cacheline-aligned payload buffer.
+ * A single failed transport stage quarantines this endpoint until a
+ * cold boot: retrying a potentially completed WRITE10 risks corruption. */
+static int scsi_bot_out(const uint8_t *cdb,uint32_t cdb_len,
+                        const uint8_t *src,uint32_t bytes)
+{
+    if(transport_dead || !frf_xhci_host_msc_slot() ||
+       cdb_len<1u || cdb_len>16u || !src ||
+       bytes==0u || bytes>sizeof(payload))return 0;
+    mem_zero(cbw,sizeof(cbw));
+    mem_zero(csw,sizeof(csw));
+    cbw[0]='U';cbw[1]='S';cbw[2]='B';cbw[3]='C';
+    const uint32_t tag=++bot_tag;
+    le32_store(cbw+4u,tag);
+    le32_store(cbw+8u,bytes);
+    cbw[12]=0u; /* HOST TO DEVICE, not 0x80 IN */
+    cbw[13]=0u; /* LUN 0 */
+    cbw[14]=(uint8_t)cdb_len;
+    for(uint32_t i=0u;i<cdb_len;++i)cbw[15u+i]=cdb[i];
+
+    uint32_t got=0u;
+    last_bot_error=0u;
+    if(!frf_xhci_host_bulk_out(cbw,31u,&got) || got!=31u) {
+        last_bot_error=11u;
+        goto transport_failure;
+    }
+    got=0u;
+    if(!frf_xhci_host_bulk_out(src,bytes,&got) || got!=bytes) {
+        last_bot_error=12u;
+        goto transport_failure;
+    }
+    got=0u;
+    if(!frf_xhci_host_bulk_in(csw,13u,&got) || got!=13u) {
+        last_bot_error=13u;
+        goto transport_failure;
+    }
+    if(csw[0]!='U' || csw[1]!='S' ||
+       csw[2]!='B' || csw[3]!='S') {
+        last_bot_error=14u;
+        goto transport_failure;
+    }
+    if(le32_load(csw+4u)!=tag || le32_load(csw+8u)!=0u) {
+        last_bot_error=15u;
+        goto transport_failure;
+    }
+    if(csw[12]!=0u) {
+        last_bot_error=16u; /* SCSI status failed; disk may be read-only */
+        goto transport_failure;
+    }
+    return 1;
+transport_failure:
+    transport_dead=1u;
+    ++transport_fail_count;
+    return 0;
+}
+#endif
+
 uint32_t frf_pi4_um_capacity(void){return capacity_sectors;}
 
 /* One bounded synchronous capacity probe. USB spinning disks may return
@@ -153,9 +215,15 @@ static void try_read_capacity(void)
         extern volatile uint32_t frf_r76_usb_mass_count;
         __atomic_store_n(&frf_r76_usb_mass_count,1u,__ATOMIC_RELEASE);
     }
+#if defined(FRF_PI4_USB_MASS_RW)
+    kprintf("[R121-MSC] USB unit0 RW READY slot=%u sectors=%u MiB=%u attempt=%u\n",
+            frf_xhci_host_msc_slot(),capacity_sectors,
+            capacity_sectors/2048u,capacity_attempts);
+#else
     kprintf("[R112-MSC] USB unit0 RO READY slot=%u sectors=%u MiB=%u attempt=%u\n",
             frf_xhci_host_msc_slot(),capacity_sectors,
             capacity_sectors/2048u,capacity_attempts);
+#endif
 }
 
 uint32_t frf_pi4_um_last_bot_error(void){return last_bot_error;}
@@ -238,7 +306,11 @@ void frf_pi4_um_service(void)
         return;
 
     s->reserved[0]=frf_xhci_host_msc_slot();
+#if defined(FRF_PI4_USB_MASS_RW)
+    s->reserved[1]=0x50493457u; /* "PI4W": Pi4 WRITE10 enabled */
+#else
     s->reserved[1]=0x50493452u; /* "PI4R": read-only Pi4 transport */
+#endif
     /* The 68k may autoconfigure the FRUM board before a spinning HDD
      * becomes ready. Publish late capacity changes without overwriting
      * a guest request or pretending the disk is ready prematurely. */
@@ -259,9 +331,36 @@ void frf_pi4_um_service(void)
     __atomic_store_n(&s->state,FRF_UM_BUSY,__ATOMIC_RELEASE);
 
     int32_t rc=-1;
+#if defined(FRF_PI4_USB_MASS_RW)
+    if(command==FRF_UM_WRITE && !transport_dead &&
+       capacity_sectors && sectors>0u &&
+       sectors<=FRF_UM_MAX_SECTORS && lba<capacity_sectors &&
+       sectors<=capacity_sectors-lba) {
+        /* Guest has finished staging data before publishing REQ.  Copy to
+         * a private aligned ARM DMA buffer before starting USB transfer. */
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        const uint32_t bytes=sectors*FRF_UM_SECTOR_SIZE;
+        for(uint32_t i=0u;i<bytes;++i)payload[i]=s->data[i];
+        uint8_t cdb[10]={0x2au,0u,0u,0u,0u,0u,0u,0u,0u,0u};
+        cdb[2]=(uint8_t)(lba>>24);cdb[3]=(uint8_t)(lba>>16);
+        cdb[4]=(uint8_t)(lba>>8);cdb[5]=(uint8_t)lba;
+        cdb[7]=(uint8_t)(sectors>>8);cdb[8]=(uint8_t)sectors;
+        if(scsi_bot_out(cdb,10u,payload,bytes)) {
+            rc=(int32_t)bytes;
+        } else {
+            /* Any ambiguous write outcome must NOT be automatically
+             * retried. Withdraw media and require a cold boot. */
+            capacity_sectors=0u;
+            extern volatile uint32_t frf_r76_usb_mass_count;
+            __atomic_store_n(&frf_r76_usb_mass_count,0u,__ATOMIC_RELEASE);
+            kprintf("[R121-MSC] WRITE10 fail LBA=%u sectors=%u BOT=%u; "
+                    "endpoint quarantined\n",
+                    lba,sectors,last_bot_error);
+        }
+    } else
+#endif
     if(command==FRF_UM_WRITE) {
-        /* Explicitly fail every write, even a malformed 68k command. */
-        rc=-30;
+        rc=-30; /* RO build or out-of-range write: no USB command */
     } else if(command==FRF_UM_READ && !transport_dead &&
               capacity_sectors && sectors>0u &&
               sectors<=FRF_UM_MAX_SECTORS && lba<capacity_sectors &&
@@ -295,6 +394,7 @@ void frf_pi4_um_service(void)
     s->completed=seq;
     __atomic_thread_fence(__ATOMIC_RELEASE);
     __atomic_store_n(&s->state,
-           (command==FRF_UM_READ && rc==(int32_t)(sectors*FRF_UM_SECTOR_SIZE)) ?
+           ((command==FRF_UM_READ || command==FRF_UM_WRITE) &&
+             rc==(int32_t)(sectors*FRF_UM_SECTOR_SIZE)) ?
            FRF_UM_DONE:FRF_UM_ERROR,__ATOMIC_RELEASE);
 }

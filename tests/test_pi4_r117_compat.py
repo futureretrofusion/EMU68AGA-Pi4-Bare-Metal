@@ -20,7 +20,7 @@ for fld in ("BOARD:", "FW PRE:", "PCIE:", "REC:", "DMA:", "XHCI STAGE:", "MSC TR
     assert fld in h,fld
 assert 'option(FRF_PI4_LEGACY_REV_DIAG' in c
 assert 'FRF_PI4_LEGACY_REV_DIAG=1' in c
-assert '"R117"' in (r/"machine/Emu68/include/frf_pi4_post_versions.h").read_text()
+assert any(v in (r/"machine/Emu68/include/frf_pi4_post_versions.h").read_text() for v in ('"R117"','"R121"'))
 assert 'const int w=333,x=AGA_OUT_W-w-5,y=2,h=282;' in h
 assert 2+4+16*16+16 <= 286
 assert 2+282 <= 286

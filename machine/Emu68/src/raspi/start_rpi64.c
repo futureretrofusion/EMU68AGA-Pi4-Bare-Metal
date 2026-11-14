@@ -608,6 +608,11 @@ void display_logo()
 #endif
     /* Print EMu68 version number and git sha. */
     kprintf_pc(__putc, NULL, &VERSION_STRING[6]);
+#if defined(FRF_PI4_SUPPRESS_DIAGNOSTIC_POST) && defined(FRF_PI4_USB_MASS_RW)
+    /* Normal boot logo only: one brief build ID, no diagnostic table or
+     * persistent telemetry overlay after Workbench takes the display. */
+    kprintf_pc(__putc, NULL, "FRF PI4 R121 USB RW\n");
+#endif
     
     /* Reset test coordinates for further text printing (e.g. buptest) */
     text_x = 0;
