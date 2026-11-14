@@ -89,6 +89,13 @@ volatile uint32_t frf_usb_fw_after;
 volatile uint32_t frf_usb_reset_rc;
 volatile uint32_t frf_usb_caps_reads;
 volatile uint32_t frf_usb_caps_raw;
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+/* R125 visual checkpoints; sampled on native AGA CPU0, written by USB CPU1. */
+volatile uint32_t frf_r125_fw_phase;
+volatile uint32_t frf_r125_fw_notify_ms;
+volatile uint32_t frf_r125_fw_poll_ms;
+volatile uint32_t frf_r125_board_revision;
+#endif
 /* R46: inbound PCIe DMA window needed for VL805 to fetch rings in RAM.
  * Readbacks are from BCM2711 RC MMIO, not synthetic expected values. */
 volatile uint32_t frf_usb_dma_rc_bar2_before,frf_usb_dma_rc_bar2_after;
@@ -560,6 +567,18 @@ const volatile struct FRFXHCIProbeInfo *frf_xhci_probe_info(void) { return &g_xh
 uint32_t frf_xhci_probe_run(void)
 {
     reset_info(g_xhci.probes+1u);
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+    /* Read hardware revision from firmware-provided FDT, not from the
+     * shared VideoCore mailbox on USB CPU1. This is diagnostic only. */
+    frf_r125_fw_phase=1u;
+    frf_r125_fw_notify_ms=0u;
+    frf_r125_fw_poll_ms=0u;
+    of_node_t *system=dt_find_node("/system");
+    of_property_t *revision=system?dt_find_property(system,"linux,revision"):0;
+    frf_r125_board_revision=(revision && revision->op_value &&
+                             revision->op_length>=4u)?
+        BE32(*(const uint32_t*)(const void*)revision->op_value):0u;
+#endif
     of_node_t *pcie=dt_find_node("/scb/pcie@7d500000");
     if (!pcie) {
         g_xhci.status=FRFXHCI_PROBE_NO_DT_NODE; frf_pci_ro_probe_status=g_xhci.status;
@@ -613,9 +632,20 @@ uint32_t frf_xhci_probe_run(void)
      * ready and an unconditional reset is harmful/unnecessary. */
     frf_usb_fw_before=cfg_read32(rc,1,0,0,VL805_PCI_FW_VERSION);
     frf_usb_reset_rc=0x7fffffffu; /* skipped */
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+    frf_r125_fw_phase=2u; /* PCI mapped, before conditional notification */
+#endif
     if (frf_usb_fw_before==0u) {
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+        frf_r125_fw_phase=3u; /* firmware version zero -> notify once */
+        const uint64_t t_notify=sys_us();
+#endif
         int fw=frf_notify_xhci_reset(0x00100000u);
         frf_usb_reset_rc=(uint32_t)fw;
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+        frf_r125_fw_notify_ms=(uint32_t)((sys_us()-t_notify)/1000u);
+        frf_r125_fw_phase=4u;
+#endif
         delay_us_local(1000);
         /* The firmware reset may clear command/BAR config; re-establish
          * mappings before trying the xHCI memory registers again. */
@@ -624,12 +654,27 @@ uint32_t frf_xhci_probe_run(void)
         cfg_write16(rc,1,0,0,PCI_COMMAND,
                     (uint16_t)(c|PCI_COMMAND_MEMORY|PCI_COMMAND_MASTER));
         frf_usb_endpoint_command=cfg_read16(rc,1,0,0,PCI_COMMAND);
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+        /* Dedicated early-board VL805 EEPROMs can require longer
+         * recovery; wait for valid nonzero PCI firmware up to 3 seconds.
+         * Never blindly reset an already-live controller. */
+        for(unsigned tries=0;tries<3000u;tries++) {
+            frf_r125_fw_poll_ms=tries;
+            const uint32_t v=cfg_read32(rc,1,0,0,VL805_PCI_FW_VERSION);
+            if (v!=0u && v!=0xffffffffu) break;
+            delay_us_local(1000u);
+        }
+#else
         for (unsigned tries=0;tries<200u;tries++) {
             if (cfg_read32(rc,1,0,0,VL805_PCI_FW_VERSION)!=0u) break;
             delay_us_local(1000u);
         }
+#endif
     }
     frf_usb_fw_after=cfg_read32(rc,1,0,0,VL805_PCI_FW_VERSION);
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+    frf_r125_fw_phase=5u; /* FW polled, before xHCI caps */
+#endif
     kprintf("[VL805:R40] firmware before=%08x after=%08x reset=%08x BAR=%08x EPcmd=%04x\n",
        frf_usb_fw_before,frf_usb_fw_after,frf_usb_reset_rc,
        frf_usb_endpoint_bar,frf_usb_endpoint_command);
@@ -651,6 +696,9 @@ uint32_t frf_xhci_probe_run(void)
     g_xhci.reg_bytes=bytes;
     g_xhci.capbase=cb; g_xhci.hcsparams1=hs; g_xhci.hccparams1=hc;
     g_xhci.dboff=db; g_xhci.rtsoff=rt;
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+    frf_r125_fw_phase=caps_ok?6u:0xe6u;
+#endif
     if (!caps_ok) {
         g_xhci.status=FRFXHCI_PROBE_BAD_CAPS; frf_pci_ro_probe_status=g_xhci.status;
         g_xhci.state=FRFS_USB_BACKEND_ERROR;

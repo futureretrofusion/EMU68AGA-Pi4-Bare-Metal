@@ -1756,7 +1756,11 @@ static void r94_post_panel(uint32_t *dst)
     ovl_fill(dst,x,y,w,h,R94_POST_BG);
     ovl_fill(dst,x,y,w,2,cyan);
     ovl_fill(dst,x,y+h-2,w,2,cyan);
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R125 FW SAFE USB",cyan);
+#else
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R115 LIVE USB POST",cyan);
+#endif
     r94_post_text(dst,x+8,y+ym+16*1,"HOST:",white);
     r94_post_text(dst,x+62,y+ym+16*1,frf_usb_boot_ready?"RUN":"SCAN",
                   frf_usb_boot_ready?green:amber);
@@ -1813,6 +1817,36 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_hex(dst,x+110,y+ym+16*12,frf_usb_host_phase,2,cyan);
     r94_post_text(dst,x+164,y+ym+16*12,"HID ERR:",white);
     r94_post_hex(dst,x+253,y+ym+16*12,frf_r99_hid_error_count,2,amber);
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+    extern volatile uint32_t frf_r125_fw_phase,frf_r125_fw_notify_ms;
+    extern volatile uint32_t frf_r125_board_revision;
+    extern volatile uint32_t frf_r125_cnr_ms,frf_r125_cnr_sts;
+    extern volatile uint32_t frf_usb_fw_before,frf_usb_fw_after;
+    extern volatile uint32_t frf_usb_reset_rc,frf_usb_caps_raw;
+    /* No HID seen: show the firmware->PCIe->xHCI takeover checkpoints,
+     * and preserve earlier rows for USB port enumeration. 800x286 safe. */
+    if(!frf_r76_usb_keyboard_count && !frf_r76_usb_mouse_count) {
+        r94_post_text(dst,x+8,y+ym+16*13,"FW0:",white);
+        r94_post_hex(dst,x+62,y+ym+16*13,frf_usb_fw_before,8,cyan);
+        r94_post_text(dst,x+175,y+ym+16*13,"FW1:",white);
+        r94_post_hex(dst,x+220,y+ym+16*13,frf_usb_fw_after,8,cyan);
+        r94_post_text(dst,x+8,y+ym+16*14,"N:",white);
+        r94_post_hex(dst,x+35,y+ym+16*14,frf_usb_reset_rc,8,amber);
+        r94_post_text(dst,x+134,y+ym+16*14,"PH:",white);
+        r94_post_hex(dst,x+167,y+ym+16*14,frf_r125_fw_phase,2,cyan);
+        r94_post_text(dst,x+203,y+ym+16*14,"MS:",white);
+        r94_post_hex(dst,x+238,y+ym+16*14,frf_r125_fw_notify_ms,4,cyan);
+        r94_post_text(dst,x+8,y+ym+16*15,"CAPS:",white);
+        r94_post_hex(dst,x+65,y+ym+16*15,frf_usb_caps_raw,8,cyan);
+        r94_post_text(dst,x+178,y+ym+16*15,"STS:",white);
+        r94_post_hex(dst,x+221,y+ym+16*15,frf_r125_cnr_sts,8,amber);
+        r94_post_text(dst,x+8,y+ym+16*16,"BOARD:",white);
+        r94_post_hex(dst,x+82,y+ym+16*16,frf_r125_board_revision,8,cyan);
+        r94_post_text(dst,x+180,y+ym+16*16,"CNR:",white);
+        r94_post_hex(dst,x+230,y+ym+16*16,frf_r125_cnr_ms,4,cyan);
+    } else
+#endif
+    {
     r94_post_text(dst,x+8,y+ym+16*13,"MOUSE RAW:",white);
     r94_post_hex(dst,x+140,y+ym+16*13,frf_r58_hid_raw,8,cyan);
     r94_post_text(dst,x+8,y+ym+16*14,"BTN:",white);
@@ -1830,6 +1864,7 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_hex(dst,x+132,y+ym+16*16,frf_r58_hid_last_size,2,cyan);
     r94_post_text(dst,x+186,y+ym+16*16,"PAD RX:",white);
     r94_post_hex(dst,x+258,y+ym+16*16,frf_native_usb_pad_reports,4,cyan);
+    }
 #else
 #if defined(FRF_PI4_MOUSE_DIAG)
     const int w=310,x=AGA_OUT_W-w-7,y=8,h=337;

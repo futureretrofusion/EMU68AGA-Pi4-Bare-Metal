@@ -239,6 +239,9 @@ volatile uint32_t frf_usb_r54_sts_after_run;
 volatile uint32_t frf_usb_r54_attempts;
 /* R58: CPU1 MMIO/event-ring snapshots, displayed by CPU3 HDMI. */
 volatile uint32_t frf_r58_usbcmd,frf_r58_usbsts,frf_r58_portsc1;
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+volatile uint32_t frf_r125_cnr_ms,frf_r125_cnr_sts;
+#endif
 volatile uint32_t frf_r58_evt_ctrl[4],frf_r58_evt_status[4];
 volatile uint32_t frf_r58_evt_type,frf_r58_evt_cc,frf_r58_evt_slot,frf_r58_evt_count;
 static void frf_r58_note_event(uint32_t status,uint32_t control);
@@ -3491,6 +3494,24 @@ static int controller_take_ownership(void)
 
     frf_usb_host_phase=2u; /* before host RESET */
     host_write32(g_op + XHCI_OP_USBCMD, cmd | XHCI_CMD_HCRST);
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+    if (!host_wait_mask(g_op + XHCI_OP_USBCMD, XHCI_CMD_HCRST, 0U, 2000U)) {
+        frf_r125_cnr_sts=host_read32(g_op+XHCI_OP_USBSTS);
+        g_host.error = FRFXHCI_HE_RESET_TIMEOUT;
+        return 0;
+    }
+    const uint64_t t_cnr=host_counter();
+    const int cnr_ok=host_wait_mask(g_op+XHCI_OP_USBSTS,
+                                      XHCI_STS_CNR,0U,2000U);
+    const uint64_t hz=host_counter_hz();
+    frf_r125_cnr_ms=hz?(uint32_t)(((host_counter()-t_cnr)*1000ULL)/hz):
+                      0xffffffffu;
+    frf_r125_cnr_sts=host_read32(g_op+XHCI_OP_USBSTS);
+    if(!cnr_ok) {
+        g_host.error=FRFXHCI_HE_CNR_TIMEOUT;
+        return 0;
+    }
+#else
     if (!host_wait_mask(g_op + XHCI_OP_USBCMD, XHCI_CMD_HCRST, 0U, 500U)) {
         g_host.error = FRFXHCI_HE_RESET_TIMEOUT;
         return 0;
@@ -3499,6 +3520,7 @@ static int controller_take_ownership(void)
         g_host.error = FRFXHCI_HE_CNR_TIMEOUT;
         return 0;
     }
+#endif
 
     frf_r55_first_hse=0u;
     frf_r55_dma_bad=0u;

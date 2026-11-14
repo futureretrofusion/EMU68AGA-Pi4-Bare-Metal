@@ -286,8 +286,51 @@ int frf_notify_xhci_reset(uint32_t pci_bdf)
     FBReq[6] = 0;
 
     arm_flush_cache((intptr_t)FBReq, 28);
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+    /* R125: the R115 shared mailbox helpers wait FOREVER when VideoCore
+     * fails to respond. Use a bounded sender/receiver specifically for
+     * NOTIFY_XHCI_RESET. This does not change other firmware APIs.
+     * Never perform another notify automatically after a timeout:
+     * the mailbox exchange may have been received but the reply lost.
+     * Timer low counter wrap is safe for these short windows. */
+    volatile uint32_t *status=(volatile uint32_t*)(ARM_PERIIOBASE+0xB898);
+    volatile uint32_t *send=(volatile uint32_t*)(ARM_PERIIOBASE+0xB8A0);
+    volatile uint32_t *recv=(volatile uint32_t*)(ARM_PERIIOBASE+0xB880);
+    volatile uint32_t *clock=(volatile uint32_t*)(ARM_PERIIOBASE+0x3004);
+    const uint32_t phys=(uint32_t)mmu_virt2phys((intptr_t)FBReq);
+    uint32_t begin=LE32(*clock);
+    while (LE32(*status)&MBOX_TX_FULL) {
+        dsb();
+        if ((uint32_t)(LE32(*clock)-begin)>=500000u)
+            return -3; /* mailbox TX stuck; NO reset sent */
+        __asm__ volatile("yield");
+    }
+    dmb();
+    *send=LE32((phys&~MBOX_CHANMASK)|8u);
+    dsb();
+    begin=LE32(*clock);
+    int replied=0;
+    while ((uint32_t)(LE32(*clock)-begin)<5000000u) {
+        if (LE32(*status)&MBOX_RX_EMPTY) {
+            dsb();
+            __asm__ volatile("yield");
+            continue;
+        }
+        dmb();
+        const uint32_t packet=LE32(*recv);
+        dmb();
+        if ((packet&MBOX_CHANMASK)==8u &&
+             (packet&~MBOX_CHANMASK)==(phys&~MBOX_CHANMASK)) {
+            replied=1;
+            break;
+        }
+    }
+    if(!replied)
+        return -4; /* mailbox RX timed out, no automatic retry */
+#else
     mbox_send(8, mmu_virt2phys((intptr_t)FBReq));
     mbox_recv(8);
+#endif
     arm_dcache_invalidate((intptr_t)FBReq, 28);
 
     if (LE32(FBReq[1]) != 0x80000000u)
