@@ -1,0 +1,17 @@
+; Only run after a successful READ-ONLY manual USBP4 mount and list test.
+; Copy USBP4 into DEVS:DOSDrivers so AmigaOS mounts it at startup.
+FailAt 20
+If NOT EXISTS DEVS:pi4usbmass.device
+ Echo "DEVS:pi4usbmass.device not installed. STOP."
+ Quit 20
+EndIf
+If NOT EXISTS L:fat95
+ Echo "L:fat95 missing. STOP."
+ Quit 20
+EndIf
+If EXISTS DEVS:DOSDrivers/USBP4
+ Echo "USBP4 already in DEVS:DOSDrivers; no overwrite."
+ Quit 10
+EndIf
+Copy Storage/DOSDrivers/USBP4 DEVS:DOSDrivers/USBP4
+Echo "USBP4 DOSDriver installed for boot. Pi4 usbmass remains read-only."

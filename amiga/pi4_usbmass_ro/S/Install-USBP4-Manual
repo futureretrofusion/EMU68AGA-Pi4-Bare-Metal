@@ -1,0 +1,21 @@
+; Run this from the kit directory in AmigaShell.
+; Requires R115 Pi4, L:fat95 on the actual SYS: volume and a visible FRUM board.
+; This is a manual read-only test, NOT automatic boot mounting.
+FailAt 20
+If NOT EXISTS L:fat95
+ Echo "Missing L:fat95 on this AmigaOS installation; nothing installed."
+ Quit 20
+EndIf
+If EXISTS DEVS:pi4usbmass.device
+ Echo "DEVS:pi4usbmass.device already exists; check version before replacing. STOP."
+ Quit 10
+EndIf
+If EXISTS SYS:Storage/DOSDrivers/USBP4
+ Echo "USBP4 already present in SYS:Storage/DOSDrivers; inspect first. STOP."
+ Quit 10
+EndIf
+Copy DEVS/pi4usbmass.device DEVS:
+Copy Storage/DOSDrivers/USBP4 SYS:Storage/DOSDrivers/USBP4
+Echo "Files installed. Running one READ-ONLY mount test."
+Mount USBP4: FROM SYS:Storage/DOSDrivers/USBP4
+Info
