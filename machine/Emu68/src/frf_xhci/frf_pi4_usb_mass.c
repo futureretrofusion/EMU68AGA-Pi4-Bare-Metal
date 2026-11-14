@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
- * FRF EMU68AGA Pi4 R114, native xHCI USB Mass Storage (BOT/SCSI READ10).
+ * FRF EMU68AGA Pi4 R115, native xHCI USB Mass Storage (BOT/SCSI READ10).
  * One boot-present 512-byte SCSI disk, exclusively ARM CPU1, read-only.
  *
  * Uses the proven FRUM v1 Pi3 virtual Zorro-II mailbox and AmigaOS driver.
@@ -25,6 +25,9 @@ static uint32_t capacity_check_first_reported;
 static uint32_t transport_dead;
 static uint32_t read_errors;
 static uint32_t transport_fail_count;
+/* One inline SCSI capacity query at the moment xHCI BOT endpoint setup
+ * succeeds. Avoid resetting media state at end of lengthy hub scans. */
+static uint32_t inline_probe_started;
 /* DMA buffers must be cacheline aligned; never DMA directly into an
  * emulated 68k mapping or a small unaligned stack allocation. */
 static uint8_t cbw[64] __attribute__((aligned(64)));
@@ -160,8 +163,30 @@ uint32_t frf_pi4_um_attempts(void){return capacity_attempts;}
 uint32_t frf_pi4_um_transport_dead(void){return transport_dead;}
 uint32_t frf_pi4_um_transport_failures(void){return transport_fail_count;}
 
+/* R115: The native Pi4 scanner has the newly configured mass-storage
+ * slot selected NOW, even if two nested external hubs take a long time
+ * to enumerate. One 350ms-bounded BOT transaction may run while no
+ * HID interrupt-IN polling has started; never wait for full hub scan.
+ * An actual spinning-disk CHECK CONDITION is retried later as before. */
+void frf_pi4_um_probe_inline(void)
+{
+    if(inline_probe_started || !frf_xhci_host_msc_slot())return;
+    inline_probe_started=1u;
+    kprintf("[R115-MSC] inline capacity probe slot%u before remaining hub scan\n",
+            frf_xhci_host_msc_slot());
+    try_read_capacity();
+}
+
 void frf_pi4_um_init(void)
 {
+    if(inline_probe_started) {
+        /* Retain ready capacity AND the fail-closed transport state from
+         * inline enumeration; do not re-open a failed xHCI endpoint. */
+        kprintf("[R115-MSC] retain inline probe slot%u capacity=%u BOT=%u tries=%u\n",
+                frf_xhci_host_msc_slot(),capacity_sectors,last_bot_error,
+                capacity_attempts);
+        return;
+    }
     capacity_sectors=0u;
     media_reported=0u;
     capacity_attempts=0u;

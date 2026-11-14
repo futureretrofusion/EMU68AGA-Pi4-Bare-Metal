@@ -287,6 +287,15 @@ static uint32_t g_frf_msc_slot;
 volatile uint32_t frf_r112_msc_seen,frf_r112_msc_registered;
 volatile uint32_t frf_r112_msc_uasp,frf_r112_msc_config_errors;
 volatile uint32_t frf_r112_msc_last_vidpid;
+/* CPU1-only scanner progress is exposed as read-only fields to Pi4 HUD.
+ * Depth 0=root internal hub, 1=external, 2=cascaded external hub.
+ * An absolute elapsed-time budget is independent of any device count. */
+volatile uint32_t frf_r115_scan_port,frf_r115_scan_depth;
+volatile uint32_t frf_r115_scan_budget_hit,frf_r115_scan_child_count;
+static uint64_t frf_r115_scan_deadline;
+#if defined(FRF_PI4_USB_MASS_RO)
+extern void frf_pi4_um_probe_inline(void);
+#endif
 
 static uint32_t g_bulk_in_dci;
 static uint32_t g_bulk_out_dci;
@@ -2570,6 +2579,17 @@ static int r97_scan_hub(struct R97HubState *hub)
     r97_select_hub(hub);
     frf_r97_ext_stage=4u;
     for(uint32_t port=1u;port<=hub->ports;port++) {
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_PI4_USB_MASS_RO)
+        if(frf_r115_scan_deadline &&
+           host_timed_out(frf_r115_scan_deadline)) {
+            frf_r115_scan_budget_hit=1u;
+            kprintf("[R115-SCAN] ext hub power scan budget reached depth%u port%u\n",
+                    hub->depth,port);
+            break;
+        }
+        frf_r115_scan_depth=hub->depth;
+        frf_r115_scan_port=port;
+#endif
         if(!hub_port_feature(port,USB_HUB_FEAT_PORT_POWER,1)) {
             frf_r97_ext_error=0xe1u;
             kprintf("[R97-HUB] depth%u port%u power failed\n",hub->depth,port);
@@ -2578,6 +2598,20 @@ static int r97_scan_hub(struct R97HubState *hub)
     }
     hub_delay_ms(hub->power_ms);
     for(uint32_t port=1u;port<=hub->ports;port++) {
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_PI4_USB_MASS_RO)
+        /* A slow/broken hub must not indefinitely block the already-live
+         * MSC slot (nor stop the guest boot). No artificial device cap. */
+        if(frf_r115_scan_deadline &&
+           host_timed_out(frf_r115_scan_deadline)) {
+            frf_r115_scan_budget_hit=1u;
+            kprintf("[R115-SCAN] budget reached in external hub depth%u port%u\n",
+                    hub->depth,port);
+            break;
+        }
+        frf_r115_scan_depth=hub->depth;
+        frf_r115_scan_port=port;
+        ++frf_r115_scan_child_count;
+#endif
         /* R112: being at the HID-interface ceiling is NOT a reason to
          * stop scanning; storage might be on any subsequent hub port. */
         if(g_r97_next_bank>=R97_CHILD_CONTEXT_BANKS ||
@@ -2674,6 +2708,10 @@ static int r97_scan_hub(struct R97HubState *hub)
                 g_frf_msc_slot=g_slot_id;
                 ++frf_r112_msc_registered;
                 ++g_r97_next_bank;
+                /* While the new disk endpoint is active, submit ONE
+                 * guarded capacity probe. No other HID polls are running
+                 * during cold enumeration. Restore hub EP0 afterwards. */
+                frf_pi4_um_probe_inline();
                 kprintf("[R111-MSC] ext hub port%u slot%u VID:PID=%04x:%04x RO\n",
                         port,g_frf_msc_slot,d->vid,d->pid);
                 r97_select_hub(hub);
@@ -2746,6 +2784,9 @@ volatile uint32_t frf_r57_hub_st_ok,frf_r57_hub_st_fail;
 static int hub_scan_children(void)
 {
     frf_r99_root_monitor_port=0u;
+    frf_r115_scan_depth=frf_r115_scan_port=0u;
+    frf_r115_scan_budget_hit=frf_r115_scan_child_count=0u;
+    frf_r115_scan_deadline=0u;
     g_r99_root_valid=0u;
     frf_r99_root_status=frf_r99_root_change=0u;
     frf_r99_root_poll_ok=frf_r99_root_poll_fail=0u;
@@ -2827,6 +2868,13 @@ static int hub_scan_children(void)
         return 1;
 
     const struct FRFXHCIHostInfo root_info = g_host;
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_PI4_USB_MASS_RO)
+    /* R115: bound initial VL805 + cascaded USB2 hub enumeration to twelve
+     * seconds on CPU1. CPU0 Amiga boot is independent. Once this expires,
+     * finish with the already configured input/storage slots and begin
+     * serving them. Do not reset the root hub or any live child. */
+    frf_r115_scan_deadline=host_deadline_ms(12000u);
+#endif
     g_root_hub_slot = g_slot_id;
     g_root_hub_speed = g_port_speed;
     struct XHCIRing root_ep0_ring = g_ep0_ring;
@@ -2861,6 +2909,15 @@ static int hub_scan_children(void)
     uint32_t pwr_ms=(uint32_t)g_ctrl_buffer[5]*2U + 20U;
     /* Power all downstream ports while the root hub EP0 is still active. */
     for (uint32_t port=1U; port<=g_hub_num_ports; ++port) {
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_PI4_USB_MASS_RO)
+        if(frf_r115_scan_deadline &&
+           host_timed_out(frf_r115_scan_deadline)) {
+            frf_r115_scan_budget_hit=1u;
+            break;
+        }
+        frf_r115_scan_depth=0u;
+        frf_r115_scan_port=port;
+#endif
         if(hub_port_feature(port,USB_HUB_FEAT_PORT_POWER,1))
             frf_r84_hub_power_ok|=(1u<<port);
         else
@@ -2877,6 +2934,15 @@ static int hub_scan_children(void)
     frf_zero_bytes(port_connected,sizeof(port_connected));
     frf_zero_bytes(port_status_failed,sizeof(port_status_failed));
     for (uint32_t port=1U; port<=g_hub_num_ports; ++port) {
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_PI4_USB_MASS_RO)
+        if(frf_r115_scan_deadline &&
+           host_timed_out(frf_r115_scan_deadline)) {
+            frf_r115_scan_budget_hit=1u;
+            break;
+        }
+        frf_r115_scan_depth=0u;
+        frf_r115_scan_port=port;
+#endif
         uint16_t st=0U,ch=0U;
         int status_ok=hub_port_status(port,&st,&ch);
         /* A cold Pi4 hub may report before the port power/line settling.
@@ -2959,6 +3025,18 @@ static int hub_scan_children(void)
      */
     for(uint32_t port=1U;port<=g_hub_num_ports &&
                g_hub_device_count<FRFXHCI_HUB_MAX_DEVICES; ++port) {
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_PI4_USB_MASS_RO)
+        if(frf_r115_scan_deadline &&
+           host_timed_out(frf_r115_scan_deadline)) {
+            frf_r115_scan_budget_hit=1u;
+            kprintf("[R115-SCAN] budget reached at root port%u; finish valid slots\n",
+                    port);
+            break;
+        }
+        frf_r115_scan_depth=0u;
+        frf_r115_scan_port=port;
+        ++frf_r115_scan_child_count;
+#endif
         if (!port_connected[port] && !port_status_failed[port])continue;
         struct FRFXHCIHubDeviceInfo *d=&g_hub_devices[g_hub_device_count];
         frf_zero_bytes(d,sizeof(*d));
@@ -3186,6 +3264,9 @@ static int hub_scan_children(void)
                 g_frf_msc_slot=g_slot_id;
                 ++frf_r112_msc_registered;
                 ++g_r97_next_bank;
+                /* R115: register capacity before scanning more potentially
+                 * unresponsive USB ports. One bounded BOT command only. */
+                frf_pi4_um_probe_inline();
                 kprintf("[R111-MSC] hub port%u slot%u VID:PID=%04x:%04x bulk %u/%u RO\n",
                         port,g_frf_msc_slot,d->vid,d->pid,ie,oe);
                 ++g_hub_device_count;
@@ -3288,6 +3369,11 @@ static int hub_scan_children(void)
     g_r99_root_next_check=0u;
     g_route_string=0u;g_slot_hub=1u;g_slot_num_ports=g_hub_num_ports;
     g_tt_hub_slot=g_tt_port=g_tt_think_time=0u;
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_PI4_USB_MASS_RO)
+    frf_r115_scan_depth=0u;
+    frf_r115_scan_port=0u;
+    /* 0 = scan finished, 1 = budgeted exit. Status stays until next boot. */
+#endif
     if(g_native_count) {
         g_host=root_info;
         g_host.state=FRFXHCI_HOST_DEVICE;

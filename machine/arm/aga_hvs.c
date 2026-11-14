@@ -1736,6 +1736,8 @@ static void r94_post_panel(uint32_t *dst)
     extern volatile uint32_t frf_r112_msc_seen,frf_r112_msc_registered;
     extern volatile uint32_t frf_r112_msc_uasp,frf_r112_msc_config_errors;
     extern volatile uint32_t frf_r112_msc_last_vidpid;
+    extern volatile uint32_t frf_r115_scan_port,frf_r115_scan_depth;
+    extern volatile uint32_t frf_r115_scan_budget_hit,frf_r115_scan_child_count;
     extern volatile uint32_t frf_usb_host_phase,frf_sdlog_xhci_stage;
     extern volatile uint32_t frf_sdlog_xhci_error,frf_r58_hid_last_size;
     extern volatile uint32_t frf_r58_hid_raw,frf_r58_hid_buttons;
@@ -1754,7 +1756,7 @@ static void r94_post_panel(uint32_t *dst)
     ovl_fill(dst,x,y,w,h,R94_POST_BG);
     ovl_fill(dst,x,y,w,2,cyan);
     ovl_fill(dst,x,y+h-2,w,2,cyan);
-    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R114 LIVE USB POST",cyan);
+    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R115 LIVE USB POST",cyan);
     r94_post_text(dst,x+8,y+ym+16*1,"HOST:",white);
     r94_post_text(dst,x+62,y+ym+16*1,frf_usb_boot_ready?"RUN":"SCAN",
                   frf_usb_boot_ready?green:amber);
@@ -1768,14 +1770,21 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_dec(dst,x+196,y+ym+16*2,frf_r76_usb_mouse_count,green);
     r94_post_text(dst,x+232,y+ym+16*2,"GP:",white);
     r94_post_dec(dst,x+266,y+ym+16*2,frf_r76_usb_gamepad_count,green);
-    r94_post_text(dst,x+8,y+ym+16*3,"USB ROOT PORT:",white);
-    r94_post_hex(dst,x+153,y+ym+16*3,frf_r99_root_status,8,cyan);
+    r94_post_text(dst,x+8,y+ym+16*3,"SCAN DEPTH:",white);
+    r94_post_hex(dst,x+122,y+ym+16*3,frf_r115_scan_depth,2,cyan);
+    r94_post_text(dst,x+161,y+ym+16*3,"PORT:",white);
+    r94_post_hex(dst,x+208,y+ym+16*3,frf_r115_scan_port,2,cyan);
+    r94_post_text(dst,x+246,y+ym+16*3,"CAP:",white);
+    r94_post_hex(dst,x+291,y+ym+16*3,frf_r115_scan_budget_hit,2,
+                 frf_r115_scan_budget_hit?amber:green);
     r94_post_text(dst,x+8,y+ym+16*4,"XHCI STAGE:",white);
     r94_post_hex(dst,x+153,y+ym+16*4,frf_sdlog_xhci_stage,8,cyan);
     r94_post_text(dst,x+8,y+ym+16*5,"HUBS:",white);
     r94_post_dec(dst,x+72,y+ym+16*5,frf_r97_hub_count,cyan);
-    r94_post_text(dst,x+137,y+ym+16*5,"HUB ERR:",white);
-    r94_post_hex(dst,x+226,y+ym+16*5,frf_r97_ext_error,2,amber);
+    r94_post_text(dst,x+130,y+ym+16*5,"STEPS:",white);
+    r94_post_hex(dst,x+200,y+ym+16*5,frf_r115_scan_child_count,2,cyan);
+    r94_post_text(dst,x+239,y+ym+16*5,"HE:",white);
+    r94_post_hex(dst,x+283,y+ym+16*5,frf_r97_ext_error,2,amber);
     r94_post_text(dst,x+8,y+ym+16*6,"MSC SEEN",white);
     r94_post_hex(dst,x+88,y+ym+16*6,seen,2,seen?green:amber);
     r94_post_text(dst,x+128,y+ym+16*6,"CFG",white);
