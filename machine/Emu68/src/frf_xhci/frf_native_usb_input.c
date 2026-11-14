@@ -131,9 +131,18 @@ void frf_native_usb_pad_update_axes(int x,int y,int x2,int y2,
     if(rr)joy|=0x0002u;
     if(!!l != !!u) joy|=0x0100u;
     if(!!rr != !!d)joy|=0x0001u;
-    aga_virtual_joy_set(1,joy,(buttons&1u)!=0u);
-    /* Pi3 port-2: button2=POTGOR14, button3=POTGOR12.
-       Unlike the old four-buttons->fire collapse, these remain distinct. */
+    /* R127: Pi4 regression — only HID button 1 was reaching CIA-A PRA7.
+     * Standard one-button Amiga titles do not sample POTGOR, so buttons
+     * 2/3 appeared dead and button 4 was completely unmapped. Fan the
+     * four HID face buttons into the primary (active-low) fire line;
+     * ALSO preserve independent secondary/tertiary POTGOR14/12 signals.
+     * This compatibility mode intentionally means buttons 2/3 assert
+     * primary fire as well as their separate pins. A future selectable
+     * independent-only mapping can avoid that overlap for multi-button
+     * games, without reintroducing dead buttons in one-button titles. */
+    const unsigned face_buttons=buttons&0x0fu;
+    aga_virtual_joy_set(1,joy,face_buttons!=0u);
+    /* Real port 2: HID button2=POTGOR14, button3=POTGOR12. */
     aga_virtual_pad_buttons(1,buttons);
     __atomic_add_fetch(&frf_native_usb_pad_reports,1u,__ATOMIC_RELAXED);
 }

@@ -4,14 +4,14 @@ r=Path(__file__).resolve().parents[1]
 source=(r/"machine/Emu68/src/raspi/start_rpi64.c").read_text()
 header=(r/"machine/Emu68/include/frf_pi4_post_versions.h").read_text()
 glue=(r/"machine/arm/aga_glue.c").read_text()
-cfg=(r/"build-pi4-r126/CMakeCache.txt").read_text()
-assert '"R126"' in header
+cfg=(r/"build-pi4-r127/CMakeCache.txt").read_text()
+assert '"R127"' in header
 assert '"v1.121"' in header
 assert 'FRF_POST_FRF_LABEL,green' in source
 assert 'FRF_POST_AGA_LABEL,yellow' in source
 assert '"EMU68AGA SYSTEM POST"' in source
 assert '"PI4 NATIVE USB RW / NON-LEGACY"' in source
-assert 'FRF PI4 R126 USB RW / POST' in source
+assert 'FRF PI4 R127 USB RW / 4BTN' in source
 assert 'frf_boot_post_stage(1u)' in source
 assert 'frf_post_active,1u' in source
 assert 'frf_post_draw()' in source
@@ -35,4 +35,4 @@ for name in ("machine/arm/aga_audio.c",
              "machine/Emu68/src/frf_xhci/frf_xhci_host.c",
              "machine/arm/aga_glue.c"):
  assert (r/name).read_bytes()==(old/name).read_bytes(),name
-print("PASS R126: splash POST version restored; native Pi4 USB RW and persistent HUD OFF retained")
+print("PASS R127: splash POST version restored; native Pi4 USB RW and persistent HUD OFF retained")

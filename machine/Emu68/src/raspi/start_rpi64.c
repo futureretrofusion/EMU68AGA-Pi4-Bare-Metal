@@ -617,7 +617,7 @@ void display_logo()
 #if defined(FRF_PI4_SUPPRESS_DIAGNOSTIC_POST) && defined(FRF_PI4_USB_MASS_RW)
     /* Normal boot logo only: one brief build ID, no diagnostic table or
      * persistent telemetry overlay after Workbench takes the display. */
-    kprintf_pc(__putc, NULL, "FRF PI4 R126 USB RW / POST\n");
+    kprintf_pc(__putc, NULL, "FRF PI4 R127 USB RW / 4BTN\n");
 #endif
     
     /* Reset test coordinates for further text printing (e.g. buptest) */
