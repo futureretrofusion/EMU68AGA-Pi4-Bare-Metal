@@ -333,7 +333,13 @@ static void frf_post_draw(void)
     frf_post_text(x+12,y+8,"EMU68AGA SYSTEM POST",white);
     frf_post_text(x+12,y+28,FRF_POST_FRF_LABEL,green);
     frf_post_text(x+12,y+48,FRF_POST_AGA_LABEL,yellow);
+    #if defined(FRF_PI4_USB_MASS_RW) && defined(FRF_PI4_SUPPRESS_DIAGNOSTIC_POST)
+    /* R126: version and native USB RW status at splash only.
+     * The separate permanent AGA overlay stays suppressed. */
+    frf_post_text(x+12,y+68,"PI4 NATIVE USB RW / NON-LEGACY",cyan);
+#else
     frf_post_text(x+12,y+68,"PI4 VL805 / ARM-NATIVE USB",cyan);
+#endif
     frf_post_box(x+12,y+92,w-24,1,grey);
     const uint32_t k=frf_r76_usb_keyboard_count,
                    m=frf_r76_usb_mouse_count,
@@ -611,7 +617,7 @@ void display_logo()
 #if defined(FRF_PI4_SUPPRESS_DIAGNOSTIC_POST) && defined(FRF_PI4_USB_MASS_RW)
     /* Normal boot logo only: one brief build ID, no diagnostic table or
      * persistent telemetry overlay after Workbench takes the display. */
-    kprintf_pc(__putc, NULL, "FRF PI4 R123 USB RW\n");
+    kprintf_pc(__putc, NULL, "FRF PI4 R126 USB RW / POST\n");
 #endif
     
     /* Reset test coordinates for further text printing (e.g. buptest) */

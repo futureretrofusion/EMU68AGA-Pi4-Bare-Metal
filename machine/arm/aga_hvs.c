@@ -1769,7 +1769,7 @@ static void r94_post_panel(uint32_t *dst)
     ovl_fill(dst,x,y,w,2,cyan);
     ovl_fill(dst,x,y+h-2,w,2,cyan);
 #if defined(FRF_PI4_USB_MASS_RW)
-    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R123 USB RW",cyan);
+    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R126 USB RW",cyan);
 #elif defined(FRF_PI4_LEGACY_REV_DIAG)
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R117 LEGACY USB",cyan);
 #else
