@@ -281,7 +281,8 @@ void frf_pi4_xhci_hid_main(void)
     if(!count || !(keyboard+mouse+gamepad)) {
 #endif
         frf_sdlog_xhci_stage=0x80000080u;
-        kprintf("[R80-USB] no supported native HID endpoint; park CPU1\n");
+        frf_post_usb_devices(0u,0u,0u,0u);
+        kprintf("[R114-USB] no supported native HID endpoint; POST failed stage, park CPU1\n");
         for (;;) __asm__ volatile("wfe");
     }
     frf_sdlog_xhci_stage=60u;

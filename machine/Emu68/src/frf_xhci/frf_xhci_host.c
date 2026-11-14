@@ -2986,7 +2986,16 @@ static int hub_scan_children(void)
          * is not reset or re-addressed. Never attempt simultaneous
          * downstream resets (USB address zero must be serialized). */
         int port_reset_ok=0,port_address_ok=0;
-        for(unsigned attempt=0u;attempt<5u;attempt++) {
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_PI4_USB_MASS_RO)
+        /* R114 diagnostic: R95 retries of an unresponsive attached HDD
+         * previously delayed USB input enumeration by many seconds.
+         * Keep two retries when other HID interfaces are live, three if
+         * this is the first device. Production/working R110 unchanged. */
+        const unsigned r114_retries=g_native_count?2u:3u;
+#else
+        const unsigned r114_retries=5u;
+#endif
+        for(unsigned attempt=0u;attempt<r114_retries;attempt++) {
             if(attempt) {
                 static const uint32_t rest_ms[5]={0u,250u,650u,950u,1200u};
                 hub_delay_ms(rest_ms[attempt]);
@@ -3705,8 +3714,19 @@ static int bulk_transfer(struct XHCIRing *ring, uint32_t dci, void *data,
     host_write32(g_db + (uintptr_t)g_slot_id * 4U, dci);
 
     uint32_t got = length;
-    if (!event_wait_transfer_trb(trb_dma, 0U, 3000U, length, &got)) {
-        kprintf("[FRFXHCI-HOST] bulk dci=%u TD completion failed\n", dci);
+#if defined(FRF_PI4_USB_MASS_RO)
+    /* R114: 3s per BOT stage x 3 stages x 12 spin-up attempts starved
+     * CPU1's HID event consumer while an unsupported/failed drive was
+     * attached. A noncompleting bulk TD gets only 350ms, then the MSC
+     * transport is quarantined until cold boot. Normal HID control
+     * transfers and hub timing are UNCHANGED. */
+    const uint32_t timeout_ms=350u;
+#else
+    const uint32_t timeout_ms=3000u;
+#endif
+    if (!event_wait_transfer_trb(trb_dma, 0U, timeout_ms, length, &got)) {
+        kprintf("[R114-MSC] bulk timeout slot=%u ep=%u bytes=%u boundMs=%u\n",
+                g_slot_id,dci,length,timeout_ms);
         return 0;
     }
     if (direction_in)

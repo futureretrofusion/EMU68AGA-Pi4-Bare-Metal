@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
- * FRF EMU68AGA Pi4 R112, native xHCI USB Mass Storage (BOT/SCSI READ10).
+ * FRF EMU68AGA Pi4 R114, native xHCI USB Mass Storage (BOT/SCSI READ10).
  * One boot-present 512-byte SCSI disk, exclusively ARM CPU1, read-only.
  *
  * Uses the proven FRUM v1 Pi3 virtual Zorro-II mailbox and AmigaOS driver.
@@ -20,6 +20,11 @@ static uint32_t capacity_attempts;
 static uint64_t next_capacity_attempt;
 static uint32_t last_bot_error;
 static uint32_t capacity_check_first_reported;
+/* Fail-closed on transport errors; never repeat an xHCI transfer on an
+ * endpoint with a timed-out TRB. Reconnect requires a cold boot. */
+static uint32_t transport_dead;
+static uint32_t read_errors;
+static uint32_t transport_fail_count;
 /* DMA buffers must be cacheline aligned; never DMA directly into an
  * emulated 68k mapping or a small unaligned stack allocation. */
 static uint8_t cbw[64] __attribute__((aligned(64)));
@@ -50,7 +55,8 @@ static void le32_store(uint8_t *p,uint32_t n)
 static int scsi_bot_in(const uint8_t *cdb,uint32_t cdb_len,
                        uint8_t *dst,uint32_t bytes)
 {
-    if(!frf_xhci_host_msc_slot() || cdb_len<1u || cdb_len>16u ||
+    if(transport_dead || !frf_xhci_host_msc_slot() ||
+       cdb_len<1u || cdb_len>16u ||
        bytes>sizeof(payload) || (bytes && !dst))return 0;
 
     mem_zero(cbw,sizeof(cbw));
@@ -70,23 +76,33 @@ static int scsi_bot_in(const uint8_t *cdb,uint32_t cdb_len,
     last_bot_error=0u;
     if(!frf_xhci_host_bulk_out(cbw,31u,&got) || got!=31u) {
         last_bot_error=1u; /* CBW stage */
+        transport_dead=1u;
+        ++transport_fail_count;
         return 0;
     }
     if(bytes && (!frf_xhci_host_bulk_in(dst,bytes,&got) || got!=bytes)) {
         last_bot_error=2u; /* data stage */
+        transport_dead=1u;
+        ++transport_fail_count;
         return 0;
     }
     got=0u;
     if(!frf_xhci_host_bulk_in(csw,13u,&got) || got!=13u) {
         last_bot_error=3u; /* CSW stage */
+        transport_dead=1u;
+        ++transport_fail_count;
         return 0;
     }
     if(csw[0]!='U' || csw[1]!='S' || csw[2]!='B' || csw[3]!='S') {
         last_bot_error=4u;
+        transport_dead=1u;
+        ++transport_fail_count;
         return 0;
     }
     if(le32_load(csw+4)!=tag || le32_load(csw+8)!=0u) {
         last_bot_error=5u;
+        transport_dead=1u;
+        ++transport_fail_count;
         return 0;
     }
     if(csw[12]!=0u) {
@@ -102,15 +118,17 @@ uint32_t frf_pi4_um_capacity(void){return capacity_sectors;}
  * SCSI CHECK CONDITION for several seconds after USB configuration. */
 static void try_read_capacity(void)
 {
-    if(!frf_xhci_host_msc_slot() || capacity_sectors ||
-       capacity_attempts>=12u) return;
+    if(transport_dead || !frf_xhci_host_msc_slot() ||
+       capacity_sectors || capacity_attempts>=12u) return;
     ++capacity_attempts;
     const uint8_t cdb[10]={0x25u,0u,0u,0u,0u,0u,0u,0u,0u,0u};
     mem_zero(payload,64u);
     if(!scsi_bot_in(cdb,10u,payload,8u)) {
         if(!capacity_check_first_reported || capacity_attempts==12u) {
-            kprintf("[R112-MSC] READ CAPACITY not ready attempt=%u/12 BOT_stage=%u (HDD spinup?)\n",
-                    capacity_attempts,last_bot_error);
+            kprintf("[R114-MSC] READ CAPACITY failed attempt=%u/12 BOT_stage=%u %s\n",
+                    capacity_attempts,last_bot_error,
+                    last_bot_error==6u?"SCSI CHECK CONDITION, retry later":
+                    "TRANSPORT FAILED, stop future probes");
             capacity_check_first_reported=1u;
         }
         return;
@@ -126,6 +144,7 @@ static void try_read_capacity(void)
         return;
     }
     capacity_sectors=last+1u;
+    transport_dead=0u;
     /* The POST and guest both need to observe late spin-up readiness. */
     {
         extern volatile uint32_t frf_r76_usb_mass_count;
@@ -138,6 +157,8 @@ static void try_read_capacity(void)
 
 uint32_t frf_pi4_um_last_bot_error(void){return last_bot_error;}
 uint32_t frf_pi4_um_attempts(void){return capacity_attempts;}
+uint32_t frf_pi4_um_transport_dead(void){return transport_dead;}
+uint32_t frf_pi4_um_transport_failures(void){return transport_fail_count;}
 
 void frf_pi4_um_init(void)
 {
@@ -147,11 +168,17 @@ void frf_pi4_um_init(void)
     next_capacity_attempt=0u;
     last_bot_error=0u;
     capacity_check_first_reported=0u;
+    transport_dead=0u;
+    transport_fail_count=0u;
+    read_errors=0u;
     if(!frf_xhci_host_msc_slot()) {
-        kprintf("[R112-MSC] no USB BOT slot: no drive enumerated at power-on\n");
+        kprintf("[R114-MSC] no BOT slot. HID remains active; no disk probe\n");
         return;
     }
-    try_read_capacity();
+    /* Return to guest promptly; do not perform synchronous SCSI during
+     * post-Wi-Fi startup. CPU1 probes later in its ordinary loop. */
+    kprintf("[R114-MSC] slot%u configured: SCSI probe deferred, bounded\n",
+            frf_xhci_host_msc_slot());
 }
 
 /* CPU1 calls this with its monotonic CNT ticks. Polling the disk is throttled
@@ -159,15 +186,21 @@ void frf_pi4_um_init(void)
  * The xHCI host's asynchronous HID completion queue remains independent. */
 void frf_pi4_um_retry(uint64_t now,uint64_t hz)
 {
-    if(capacity_sectors || !frf_xhci_host_msc_slot() ||
-       capacity_attempts>=12u || !hz || hz>2000000000ull) return;
+    if(capacity_sectors || transport_dead || !frf_xhci_host_msc_slot() ||
+       capacity_attempts>=12u || !hz || hz>2000000000ull)return;
     if(!next_capacity_attempt) {
-        next_capacity_attempt=now+2u*hz;
+        /* Initial scan returns immediately; allow HID polling first. */
+        next_capacity_attempt=now+hz/4u;
         return;
     }
     if((int64_t)(now-next_capacity_attempt)<0)return;
     next_capacity_attempt=now+2u*hz;
     try_read_capacity();
+#if defined(FRF_BOOT_POST)
+    /* The 16-bit firmware splash otherwise stays at the zero snapshot. */
+    extern void frf_boot_post_devices(void);
+    frf_boot_post_devices();
+#endif
 }
 
 void frf_pi4_um_service(void)
@@ -204,7 +237,8 @@ void frf_pi4_um_service(void)
     if(command==FRF_UM_WRITE) {
         /* Explicitly fail every write, even a malformed 68k command. */
         rc=-30;
-    } else if(command==FRF_UM_READ && capacity_sectors && sectors>0u &&
+    } else if(command==FRF_UM_READ && !transport_dead &&
+              capacity_sectors && sectors>0u &&
               sectors<=FRF_UM_MAX_SECTORS && lba<capacity_sectors &&
               sectors<=capacity_sectors-lba) {
         uint8_t cdb[10]={0x28u,0u,0u,0u,0u,0u,0u,0u,0u,0u};
@@ -216,8 +250,20 @@ void frf_pi4_um_service(void)
             for(uint32_t i=0u;i<bytes;i++)s->data[i]=payload[i];
             rc=(int32_t)bytes;
         } else {
-            kprintf("[R112-MSC] READ10 failed LBA=%u count=%u\n",
-                    lba,sectors);
+            ++read_errors;
+            kprintf("[R114-MSC] READ10 failed LBA=%u count=%u BOT=%u dead=%u\n",
+                    lba,sectors,last_bot_error,transport_dead);
+            /* An unhealthy disk must not stall AmigaOS on every filesystem
+             * retry. Stop reporting media on transport failure or after
+             * repeated SCSI check conditions. */
+            if(transport_dead || read_errors>=3u) {
+                transport_dead=1u;
+                capacity_sectors=0u;
+                {
+                    extern volatile uint32_t frf_r76_usb_mass_count;
+                    __atomic_store_n(&frf_r76_usb_mass_count,0u,__ATOMIC_RELEASE);
+                }
+            }
         }
     }
     s->result=(uint32_t)rc;

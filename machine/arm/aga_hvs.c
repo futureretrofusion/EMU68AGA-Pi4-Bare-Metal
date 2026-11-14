@@ -1568,7 +1568,7 @@ static volatile int      ovl_on = 0;       /* always off at power-on */
 void aga_video_overlay(int row, uint32_t v) { if ((unsigned)row < OVL_ROWS) ovl_val[row] = v; }
 void aga_video_overlay_allow(int on)
 {
-#ifdef FRF_RELEASE_QUIET
+#if defined(FRF_RELEASE_QUIET) && !defined(FRF_PI4_USB_HUD)
     (void)on;
     ovl_allowed = 0;
     ovl_on = 0;
@@ -1579,7 +1579,7 @@ void aga_video_overlay_allow(int on)
 }
 void aga_video_overlay_enable(int on)
 {
-#ifdef FRF_RELEASE_QUIET
+#if defined(FRF_RELEASE_QUIET) && !defined(FRF_PI4_USB_HUD)
     (void)on;
     ovl_on = 0;
 #else
@@ -1725,6 +1725,103 @@ static void r94_post_dec(uint32_t *dst,int x,int y,uint32_t v,uint32_t col)
 }
 static void r94_post_panel(uint32_t *dst)
 {
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_PI4_USB_MASS_RO)
+    /* R114: AGA's source frame is only 800x286. The old R113 panel
+     * was 337px high and all its lower diagnostics were offscreen.
+     * Draw 17 fixed-pitch rows, fully within y=2..284. No guest access. */
+    const int w=333,x=AGA_OUT_W-w-5,y=2,h=282;
+    const uint32_t white=R94_POST_WHITE,cyan=R94_POST_CYAN;
+    const uint32_t green=R94_POST_GREEN,amber=R94_POST_AMBER;
+    extern volatile uint32_t frf_r76_usb_mass_count;
+    extern volatile uint32_t frf_r112_msc_seen,frf_r112_msc_registered;
+    extern volatile uint32_t frf_r112_msc_uasp,frf_r112_msc_config_errors;
+    extern volatile uint32_t frf_r112_msc_last_vidpid;
+    extern volatile uint32_t frf_usb_host_phase,frf_sdlog_xhci_stage;
+    extern volatile uint32_t frf_sdlog_xhci_error,frf_r58_hid_last_size;
+    extern volatile uint32_t frf_r58_hid_raw,frf_r58_hid_buttons;
+    extern volatile uint32_t frf_r58_hid_click_l,frf_r58_hid_click_r;
+    extern uint32_t frf_pi4_um_attempts(void);
+    extern uint32_t frf_pi4_um_last_bot_error(void);
+    extern uint32_t frf_pi4_um_transport_dead(void);
+    extern uint32_t frf_pi4_um_transport_failures(void);
+    extern uint32_t frf_pi4_guest_mouse_button_snapshot(void);
+    extern uint32_t frf_xhci_host_msc_slot(void);
+    const uint32_t seen=frf_r112_msc_seen,configured=frf_r112_msc_registered;
+    const uint32_t ready=frf_r76_usb_mass_count,dead=frf_pi4_um_transport_dead();
+    const uint32_t failure=frf_sdlog_xhci_error,guest=frf_pi4_guest_mouse_button_snapshot();
+    const uint32_t mouse_btn=frf_r58_hid_buttons;
+    const uint32_t ym=4u;
+    ovl_fill(dst,x,y,w,h,R94_POST_BG);
+    ovl_fill(dst,x,y,w,2,cyan);
+    ovl_fill(dst,x,y+h-2,w,2,cyan);
+    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R114 LIVE USB POST",cyan);
+    r94_post_text(dst,x+8,y+ym+16*1,"HOST:",white);
+    r94_post_text(dst,x+62,y+ym+16*1,frf_usb_boot_ready?"RUN":"SCAN",
+                  frf_usb_boot_ready?green:amber);
+    r94_post_text(dst,x+160,y+ym+16*1,"ERR:",white);
+    r94_post_hex(dst,x+210,y+ym+16*1,failure,4,failure?amber:green);
+    r94_post_text(dst,x+8,y+ym+16*2,"HID:",white);
+    r94_post_dec(dst,x+54,y+ym+16*2,frf_r89_native_count,green);
+    r94_post_text(dst,x+90,y+ym+16*2,"KB:",white);
+    r94_post_dec(dst,x+122,y+ym+16*2,frf_r76_usb_keyboard_count,green);
+    r94_post_text(dst,x+163,y+ym+16*2,"MS:",white);
+    r94_post_dec(dst,x+196,y+ym+16*2,frf_r76_usb_mouse_count,green);
+    r94_post_text(dst,x+232,y+ym+16*2,"GP:",white);
+    r94_post_dec(dst,x+266,y+ym+16*2,frf_r76_usb_gamepad_count,green);
+    r94_post_text(dst,x+8,y+ym+16*3,"USB ROOT PORT:",white);
+    r94_post_hex(dst,x+153,y+ym+16*3,frf_r99_root_status,8,cyan);
+    r94_post_text(dst,x+8,y+ym+16*4,"XHCI STAGE:",white);
+    r94_post_hex(dst,x+153,y+ym+16*4,frf_sdlog_xhci_stage,8,cyan);
+    r94_post_text(dst,x+8,y+ym+16*5,"HUBS:",white);
+    r94_post_dec(dst,x+72,y+ym+16*5,frf_r97_hub_count,cyan);
+    r94_post_text(dst,x+137,y+ym+16*5,"HUB ERR:",white);
+    r94_post_hex(dst,x+226,y+ym+16*5,frf_r97_ext_error,2,amber);
+    r94_post_text(dst,x+8,y+ym+16*6,"MSC SEEN",white);
+    r94_post_hex(dst,x+88,y+ym+16*6,seen,2,seen?green:amber);
+    r94_post_text(dst,x+128,y+ym+16*6,"CFG",white);
+    r94_post_hex(dst,x+163,y+ym+16*6,configured,2,configured?green:amber);
+    r94_post_text(dst,x+201,y+ym+16*6,"READY",white);
+    r94_post_hex(dst,x+258,y+ym+16*6,ready,2,ready?green:amber);
+    r94_post_text(dst,x+8,y+ym+16*7,"MSC VID:PID:",white);
+    r94_post_hex(dst,x+140,y+ym+16*7,frf_r112_msc_last_vidpid,8,cyan);
+    r94_post_text(dst,x+8,y+ym+16*8,"MSC SLOT:",white);
+    r94_post_hex(dst,x+109,y+ym+16*8,frf_xhci_host_msc_slot(),2,cyan);
+    r94_post_text(dst,x+172,y+ym+16*8,"UAS:",white);
+    r94_post_hex(dst,x+218,y+ym+16*8,frf_r112_msc_uasp,2,amber);
+    r94_post_text(dst,x+8,y+ym+16*9,"SCSI TRY:",white);
+    r94_post_hex(dst,x+110,y+ym+16*9,frf_pi4_um_attempts(),2,cyan);
+    r94_post_text(dst,x+171,y+ym+16*9,"BOT ERR:",white);
+    r94_post_hex(dst,x+259,y+ym+16*9,frf_pi4_um_last_bot_error(),2,amber);
+    r94_post_text(dst,x+8,y+ym+16*10,"MSC TRANSPORT:",white);
+    r94_post_text(dst,x+160,y+ym+16*10,dead?"FAIL CLOSED":ready?"READY":
+                  configured?"PROBING":seen?"CONFIG ERR":"NOT SEEN",
+                  dead?amber:ready?green:cyan);
+    r94_post_text(dst,x+8,y+ym+16*11,"CFG ERROR:",white);
+    r94_post_hex(dst,x+110,y+ym+16*11,frf_r112_msc_config_errors,2,amber);
+    r94_post_text(dst,x+168,y+ym+16*11,"BOT FAIL:",white);
+    r94_post_hex(dst,x+259,y+ym+16*11,frf_pi4_um_transport_failures(),2,amber);
+    r94_post_text(dst,x+8,y+ym+16*12,"USB PHASE:",white);
+    r94_post_hex(dst,x+110,y+ym+16*12,frf_usb_host_phase,2,cyan);
+    r94_post_text(dst,x+164,y+ym+16*12,"HID ERR:",white);
+    r94_post_hex(dst,x+253,y+ym+16*12,frf_r99_hid_error_count,2,amber);
+    r94_post_text(dst,x+8,y+ym+16*13,"MOUSE RAW:",white);
+    r94_post_hex(dst,x+140,y+ym+16*13,frf_r58_hid_raw,8,cyan);
+    r94_post_text(dst,x+8,y+ym+16*14,"BTN:",white);
+    r94_post_hex(dst,x+51,y+ym+16*14,mouse_btn,2,mouse_btn&2u?green:cyan);
+    r94_post_text(dst,x+101,y+ym+16*14,"L:",white);
+    r94_post_hex(dst,x+126,y+ym+16*14,frf_r58_hid_click_l,4,cyan);
+    r94_post_text(dst,x+202,y+ym+16*14,"R:",white);
+    r94_post_hex(dst,x+228,y+ym+16*14,frf_r58_hid_click_r,4,cyan);
+    r94_post_text(dst,x+8,y+ym+16*15,"AMIGA POT:",white);
+    r94_post_hex(dst,x+119,y+ym+16*15,guest,4,cyan);
+    r94_post_text(dst,x+184,y+ym+16*15,"RMB:",white);
+    r94_post_hex(dst,x+230,y+ym+16*15,(guest&0x0400u)?0u:1u,2,
+                 (guest&0x0400u)?amber:green);
+    r94_post_text(dst,x+8,y+ym+16*16,"MOUSE BYTES:",white);
+    r94_post_hex(dst,x+132,y+ym+16*16,frf_r58_hid_last_size,2,cyan);
+    r94_post_text(dst,x+186,y+ym+16*16,"PAD RX:",white);
+    r94_post_hex(dst,x+258,y+ym+16*16,frf_native_usb_pad_reports,4,cyan);
+#else
 #if defined(FRF_PI4_MOUSE_DIAG)
     const int w=310,x=AGA_OUT_W-w-7,y=8,h=337;
 #else
@@ -1823,6 +1920,7 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_text(dst,x+9,y+320,"HID REPORT BYTES:",white);
     r94_post_hex(dst,x+180,y+320,frf_r58_hid_last_size,2,cyan);
 #endif
+#endif /* compact R114 vs legacy POST */
 }
 #endif
 
