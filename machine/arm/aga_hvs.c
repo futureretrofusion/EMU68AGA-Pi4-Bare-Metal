@@ -1768,10 +1768,10 @@ static void r94_post_panel(uint32_t *dst)
     ovl_fill(dst,x,y,w,h,R94_POST_BG);
     ovl_fill(dst,x,y,w,2,cyan);
     ovl_fill(dst,x,y+h-2,w,2,cyan);
-#if defined(FRF_PI4_USB_MASS_RW)
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R122 OLD USB DIAG",cyan);
+#elif defined(FRF_PI4_USB_MASS_RW)
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R121 USB RW",cyan);
-#elif defined(FRF_PI4_LEGACY_REV_DIAG)
-    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R117 LEGACY USB",cyan);
 #else
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R115 LIVE USB POST",cyan);
 #endif
@@ -1886,17 +1886,40 @@ static void r94_post_panel(uint32_t *dst)
 #if defined(FRF_PI4_LEGACY_REV_DIAG)
     }
 #endif
-    r94_post_text(dst,x+8,y+ym+16*14,"BTN:",white);
-    r94_post_hex(dst,x+51,y+ym+16*14,mouse_btn,2,mouse_btn&2u?green:cyan);
-    r94_post_text(dst,x+101,y+ym+16*14,"L:",white);
-    r94_post_hex(dst,x+126,y+ym+16*14,frf_r58_hid_click_l,4,cyan);
-    r94_post_text(dst,x+202,y+ym+16*14,"R:",white);
-    r94_post_hex(dst,x+228,y+ym+16*14,frf_r58_hid_click_r,4,cyan);
-    r94_post_text(dst,x+8,y+ym+16*15,"AMIGA POT:",white);
-    r94_post_hex(dst,x+119,y+ym+16*15,guest,4,cyan);
-    r94_post_text(dst,x+184,y+ym+16*15,"RMB:",white);
-    r94_post_hex(dst,x+230,y+ym+16*15,(guest&0x0400u)?0u:1u,2,
-                 (guest&0x0400u)?amber:green);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    if(frf_r117_board_revision &&
+       !frf_r76_usb_keyboard_count && !frf_r76_usb_mouse_count) {
+        /* R122: no-HID older Pi4B board. Root-port polling and
+         * completion codes discriminate missing port power from
+         * failed USB address/configuration. All counters are sampled
+         * read-only, with no USB register writes on this video CPU. */
+        r94_post_text(dst,x+8,y+ym+16*14,"POLL:",white);
+        r94_post_hex(dst,x+62,y+ym+16*14,frf_r99_root_poll_ok,4,cyan);
+        r94_post_text(dst,x+143,y+ym+16*14,"FAIL:",white);
+        r94_post_hex(dst,x+194,y+ym+16*14,frf_r99_root_poll_fail,4,
+                     frf_r99_root_poll_fail?amber:green);
+        r94_post_text(dst,x+8,y+ym+16*15,"P1 EN:",white);
+        r94_post_hex(dst,x+78,y+ym+16*15,frf_r98_root_enable_cc[0],2,cyan);
+        r94_post_text(dst,x+129,y+ym+16*15,"ADDR:",white);
+        r94_post_hex(dst,x+186,y+ym+16*15,frf_r98_root_addr_cc[0],2,cyan);
+        r94_post_text(dst,x+232,y+ym+16*15,"PWR:",white);
+        r94_post_hex(dst,x+280,y+ym+16*15,frf_r98_root_power_cycles,2,cyan);
+    } else {
+#endif
+        r94_post_text(dst,x+8,y+ym+16*14,"BTN:",white);
+        r94_post_hex(dst,x+51,y+ym+16*14,mouse_btn,2,mouse_btn&2u?green:cyan);
+        r94_post_text(dst,x+101,y+ym+16*14,"L:",white);
+        r94_post_hex(dst,x+126,y+ym+16*14,frf_r58_hid_click_l,4,cyan);
+        r94_post_text(dst,x+202,y+ym+16*14,"R:",white);
+        r94_post_hex(dst,x+228,y+ym+16*14,frf_r58_hid_click_r,4,cyan);
+        r94_post_text(dst,x+8,y+ym+16*15,"AMIGA POT:",white);
+        r94_post_hex(dst,x+119,y+ym+16*15,guest,4,cyan);
+        r94_post_text(dst,x+184,y+ym+16*15,"RMB:",white);
+        r94_post_hex(dst,x+230,y+ym+16*15,(guest&0x0400u)?0u:1u,2,
+                     (guest&0x0400u)?amber:green);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    }
+#endif
 #if defined(FRF_PI4_LEGACY_REV_DIAG)
     if(frf_r117_board_revision &&
        !frf_r76_usb_keyboard_count && !frf_r76_usb_mouse_count) {
