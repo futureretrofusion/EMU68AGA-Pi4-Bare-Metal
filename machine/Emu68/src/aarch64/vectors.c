@@ -1081,7 +1081,16 @@ int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFC) == 0x5800) { aga_blit_mode((int)(value & 3)); return 1; }   /* agaboot BLITTIMING */
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFC) == 0x5810) { aga_beam_mode = (int)(value & 3); return 1; }   /* agaboot BEAM */
     /* $5821 / $5820: the emulated chipset's sound on HDMI as well, on / off (agaboot SOUND, aga_hdmi.c) */
-    if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFE) == 0x5820) { aga_hdmi_enable((int)(value & 1)); return 1; }
+    if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFE) == 0x5820) {
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+        extern volatile uint32_t frf_r119_audio_sound_cmds,frf_r119_audio_sound_offs;
+        extern volatile uint32_t frf_r119_audio_sound_last;
+        ++frf_r119_audio_sound_cmds;
+        if (!(value & 1u)) ++frf_r119_audio_sound_offs;
+        frf_r119_audio_sound_last=(uint32_t)(value & 1u);
+#endif
+        aga_hdmi_enable((int)(value & 1u)); return 1;
+    }
     /* $5830 off / $5831 A500 / $5834 A1200: the filters on HDMI sound (agaboot SOUND FILTER, aga_hdmi_filter.h).
        Bits 1 and 15 stay clear: a kernel without this line stores the word as the core's aga_ctrl,
        where those two mean "windowed" and "use the register" */
@@ -1691,7 +1700,16 @@ int SYSWriteValToAddr(uint64_t value, uint64_t value2, int size, uint64_t far)
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFC) == 0x5800) { aga_blit_mode((int)(value & 3)); return 1; }   /* agaboot BLITTIMING */
     if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFC) == 0x5810) { aga_beam_mode = (int)(value & 3); return 1; }   /* agaboot BEAM */
     /* $5821 / $5820: the emulated chipset's sound on HDMI as well, on / off (agaboot SOUND, aga_hdmi.c) */
-    if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFE) == 0x5820) { aga_hdmi_enable((int)(value & 1)); return 1; }
+    if (far == 0xDFF1F2 && size == 2 && (value & 0xFFFE) == 0x5820) {
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+        extern volatile uint32_t frf_r119_audio_sound_cmds,frf_r119_audio_sound_offs;
+        extern volatile uint32_t frf_r119_audio_sound_last;
+        ++frf_r119_audio_sound_cmds;
+        if (!(value & 1u)) ++frf_r119_audio_sound_offs;
+        frf_r119_audio_sound_last=(uint32_t)(value & 1u);
+#endif
+        aga_hdmi_enable((int)(value & 1u)); return 1;
+    }
     /* $5830 off / $5831 A500 / $5834 A1200: the filters on HDMI sound (agaboot SOUND FILTER, aga_hdmi_filter.h).
        Bits 1 and 15 stay clear: a kernel without this line stores the word as the core's aga_ctrl,
        where those two mean "windowed" and "use the register" */

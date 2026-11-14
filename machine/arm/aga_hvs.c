@@ -1764,11 +1764,34 @@ static void r94_post_panel(uint32_t *dst)
     const uint32_t ready=frf_r76_usb_mass_count,dead=frf_pi4_um_transport_dead();
     const uint32_t failure=frf_sdlog_xhci_error,guest=frf_pi4_guest_mouse_button_snapshot();
     const uint32_t mouse_btn=frf_r58_hid_buttons;
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG) && defined(FRF_PI4_LEGACY_REV_DIAG)
+    /* The HDMI diagnostic replaces these R117 PCIe rows; other boards
+     * continue to display the R117 fields unchanged. */
+    (void)frf_r117_board_pcb;
+    (void)frf_r117_board_ram_code;
+    (void)frf_r117_legacy_recover_stage;
+    (void)frf_r117_pcie_link_status;
+    (void)frf_usb_fw_before;
+    (void)frf_usb_fw_after;
+    (void)frf_r55_dma_bad;
+    (void)frf_sdlog_xhci_stage;
+#endif
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    extern volatile uint32_t frf_r119_audio_state,frf_r119_audio_wanted;
+    extern volatile uint32_t frf_r119_audio_ready,frf_r119_audio_hsm_khz;
+    extern volatile uint32_t frf_r119_audio_no_hsm,frf_r119_audio_dma_slot;
+    extern volatile uint32_t frf_r119_audio_sound_cmds,frf_r119_audio_sound_offs;
+    extern volatile uint32_t frf_r119_audio_sound_last;
+    extern volatile uint32_t frf_r119_audio_feed_count,frf_r119_audio_feed_rejects;
+    extern volatile uint32_t frf_r119_audio_off_cmdline;
+#endif
     const uint32_t ym=4u;
     ovl_fill(dst,x,y,w,h,R94_POST_BG);
     ovl_fill(dst,x,y,w,2,cyan);
     ovl_fill(dst,x,y+h-2,w,2,cyan);
-#if defined(FRF_PI4_LEGACY_REV_DIAG)
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R119 HDMI AUDIO",cyan);
+#elif defined(FRF_PI4_LEGACY_REV_DIAG)
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R117 LEGACY USB",cyan);
 #else
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R115 LIVE USB POST",cyan);
@@ -1786,7 +1809,34 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_dec(dst,x+196,y+ym+16*2,frf_r76_usb_mouse_count,green);
     r94_post_text(dst,x+232,y+ym+16*2,"GP:",white);
     r94_post_dec(dst,x+266,y+ym+16*2,frf_r76_usb_gamepad_count,green);
-#if defined(FRF_PI4_LEGACY_REV_DIAG)
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    /* R119: HDMI audio status replaces legacy PCIe rows; USB storage/HID
+     * and R113 mouse counters stay in their previous positions.  All rows
+     * fit the existing 800x286 framebuffer without overlapping its sound
+     * ring or the AGABOOT scanline scratch. */
+    r94_post_text(dst,x+8,y+ym+16*3,"HDMI ST:",white);
+    r94_post_hex(dst,x+82,y+ym+16*3,frf_r119_audio_state,2,
+                 frf_r119_audio_state==1u?green:amber);
+    r94_post_text(dst,x+130,y+ym+16*3,"W:",white);
+    r94_post_hex(dst,x+151,y+ym+16*3,frf_r119_audio_wanted,1,cyan);
+    r94_post_text(dst,x+185,y+ym+16*3,"RD:",white);
+    r94_post_hex(dst,x+218,y+ym+16*3,frf_r119_audio_ready,1,cyan);
+    r94_post_text(dst,x+249,y+ym+16*3,"OFF:",white);
+    r94_post_hex(dst,x+301,y+ym+16*3,frf_r119_audio_off_cmdline,1,amber);
+    r94_post_text(dst,x+8,y+ym+16*4,"HSM kHz:",white);
+    r94_post_hex(dst,x+92,y+ym+16*4,frf_r119_audio_hsm_khz,8,cyan);
+    r94_post_text(dst,x+181,y+ym+16*4,"FALL:",white);
+    r94_post_hex(dst,x+238,y+ym+16*4,frf_r119_audio_no_hsm,1,
+                 frf_r119_audio_no_hsm?amber:green);
+    r94_post_text(dst,x+264,y+ym+16*4,"DMA:",white);
+    r94_post_hex(dst,x+303,y+ym+16*4,frf_r119_audio_dma_slot,2,cyan);
+    r94_post_text(dst,x+8,y+ym+16*5,"SND CMD:",white);
+    r94_post_hex(dst,x+96,y+ym+16*5,frf_r119_audio_sound_cmds,4,cyan);
+    r94_post_text(dst,x+153,y+ym+16*5,"OFF:",white);
+    r94_post_hex(dst,x+202,y+ym+16*5,frf_r119_audio_sound_offs,4,amber);
+    r94_post_text(dst,x+262,y+ym+16*5,"LAST:",white);
+    r94_post_hex(dst,x+309,y+ym+16*5,frf_r119_audio_sound_last,1,cyan);
+#elif defined(FRF_PI4_LEGACY_REV_DIAG)
     /* R117: three rows for Pi4B rev1.1 vs 1.5 comparison. Still inside
      * the proven 800x286 renderer. PCB nibble '1' denotes revision 1.1.
      * RAM code=4 means 4GiB and RAM code=2 means 1GiB. */
@@ -1831,7 +1881,13 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_hex(dst,x+163,y+ym+16*6,configured,2,configured?green:amber);
     r94_post_text(dst,x+201,y+ym+16*6,"READY",white);
     r94_post_hex(dst,x+258,y+ym+16*6,ready,2,ready?green:amber);
-#if defined(FRF_PI4_LEGACY_REV_DIAG)
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    r94_post_text(dst,x+8,y+ym+16*7,"HDMI FEED:",white);
+    r94_post_hex(dst,x+122,y+ym+16*7,frf_r119_audio_feed_count,8,
+                 frf_r119_audio_feed_count?green:amber);
+    r94_post_text(dst,x+224,y+ym+16*7,"REJ:",white);
+    r94_post_hex(dst,x+275,y+ym+16*7,frf_r119_audio_feed_rejects,4,amber);
+#elif defined(FRF_PI4_LEGACY_REV_DIAG)
     r94_post_text(dst,x+8,y+ym+16*7,"XHCI STAGE:",white);
     r94_post_hex(dst,x+151,y+ym+16*7,frf_sdlog_xhci_stage,8,cyan);
     r94_post_text(dst,x+257,y+ym+16*7,"HUB:",white);

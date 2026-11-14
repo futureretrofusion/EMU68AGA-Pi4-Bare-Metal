@@ -86,6 +86,19 @@ extern uint32_t get_clock_rate_measured(uint32_t clock_id);
 extern int get_edid_block(uint32_t block, uint8_t *out);
 
 int aga_hdmi_audio_off;                                  /* cmdline aga.nohdmiaudio */
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+/* Live audio path telemetry. Written only by the corresponding audio
+ * init/callback and sampled by the HDMI diagnostic HUD. Not shared with
+ * guest AmigaOS memory and never drives HDMI hardware. */
+volatile uint32_t frf_r119_audio_state=0xFFFFFFFFu;
+volatile uint32_t frf_r119_audio_wanted,frf_r119_audio_ready;
+volatile uint32_t frf_r119_audio_hsm_khz,frf_r119_audio_no_hsm;
+volatile uint32_t frf_r119_audio_dma_slot;
+volatile uint32_t frf_r119_audio_sound_cmds,frf_r119_audio_sound_offs;
+volatile uint32_t frf_r119_audio_sound_last=0xFFu;
+volatile uint32_t frf_r119_audio_feed_count,frf_r119_audio_feed_rejects;
+volatile uint32_t frf_r119_audio_off_cmdline;
+#endif
 int aga_hdmi_force;                                      /* cmdline aga.hdmiforce: no clock check */
 
 #define LE32(x)  __builtin_bswap32(x)                    /* the ARM runs big-endian */
@@ -363,6 +376,9 @@ static uint32_t prep_at, prep_left;
 static void set_state(int s)
 {
     __atomic_store_n(&state, s, __ATOMIC_RELEASE);
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    __atomic_store_n(&frf_r119_audio_state, (uint32_t)s, __ATOMIC_RELEASE);
+#endif
     aga_diag_set(AGA_D_HDMI_STATE, (uint32_t)s);
 }
 
@@ -697,6 +713,9 @@ static void start(int core0)
    later. */
 void aga_hdmi_enable(int on)
 {
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    __atomic_store_n(&frf_r119_audio_wanted, on?1u:0u, __ATOMIC_RELEASE);
+#endif
     /* not ready: switched off, a Pi 4 with no clock at boot, no channel in
        the DT's mask. Channels dropped from the mask later do not count here:
        Off must still end the wish and the retries (state 5 with an empty
@@ -792,6 +811,14 @@ static void ahi_report(uint32_t fill);     /* the AHI ring's counter (below) */
 
 void aga_hdmi_boot(uint8_t *fb_va, uintptr_t fb_phys)
 {
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    frf_r119_audio_off_cmdline=aga_hdmi_audio_off?1u:0u;
+    frf_r119_audio_wanted=0;
+    frf_r119_audio_ready=0;
+    frf_r119_audio_no_hsm=0;
+    frf_r119_audio_hsm_khz=0;
+    frf_r119_audio_dma_slot=0;
+#endif
     if (aga_hdmi_audio_off) { set_state(H_SWITCHED_OFF); return; }
     ahi_report(0);                       /* "understood": aga-hdmi.audio looks for it before it asks for a ring */
     pi3 = aga_is_pi3();
@@ -851,9 +878,29 @@ void aga_hdmi_boot(uint8_t *fb_va, uintptr_t fb_phys)
         uint32_t hsm = get_clock_rate_measured(HSM_CLOCK);
         aga_diag_set(AGA_D_HDMI_HSM_SET_KHZ, get_clock_rate(HSM_CLOCK) / 1000);
         aga_diag_set(AGA_D_HDMI_HSM_KHZ, hsm / 1000);
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+        frf_r119_audio_hsm_khz=hsm/1000u;
+#endif
         clk = hsm ? 108000000 : 0;
     }
-    if (!clk && !aga_hdmi_force) {                       /* aga.hdmiforce: the user knows better */
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    /* R119: On a Pi4 the firmware's measured HSM query may return zero
+     * despite an active HDMI picture (documented with CM4 in this tree).
+     * Previously this RETURNED permanently with ready=0, so later
+     * aga_hdmi_enable(1) did nothing and the housekeeper never retried.
+     * Pi4 MAI uses the fixed 108 MHz DVP rate irrespective of HSM pixel
+     * clock. Prepare ring/DMA, leave sound in H_NO_LINK, and defer ALL
+     * HDMI register accesses until guard_now/guard_ok actually detects a
+     * moving HDMI HVS picture. No forced write into an unclocked block.
+     * Pi3 retains its existing measured HSM safety checks and behaviour. */
+    if (!clk && !pi3 && !aga_hdmi_force) {
+        frf_r119_audio_no_hsm=1u;
+        set_state(H_NO_LINK);
+        kprintf("[R119-HDMI] Pi4 measured HSM=0; defer MAI until HVS picture moves\n");
+        clk=108000000u;
+    }
+#endif
+    if (!clk && !aga_hdmi_force) {
         set_state(H_NO_CLOCK);
         kprintf("[AGA] HDMI audio: no HDMI clock (no screen at boot)%s\n",
                 pi3 ? " - looked at again while sound is wanted" : " - left alone");
@@ -876,10 +923,18 @@ void aga_hdmi_boot(uint8_t *fb_va, uintptr_t fb_phys)
                                  hw->crp, hw->cts0, hw->cts1, hw->phy, hw->mai_ctl };
     for (int i = 0; i < S_N; i++) saved_reg[i] = regs[i];
     ready = 1;
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    frf_r119_audio_ready=1u;
+    frf_r119_audio_dma_slot=dma_ch>=0?(uint32_t)(dma_ch+1):0u;
+    if(state!=H_NO_CLOCK && state!=H_NO_LINK)set_state(H_OFF);
+#else
     if (state != H_NO_CLOCK) set_state(H_OFF);
+#endif
     kprintf("[AGA] HDMI audio: %s on %s (off until the Chipset menu's Sound turns it on), "
             "MAI clock %u Hz, SMP %08x, DMA channel %d\n",
-            state == H_NO_CLOCK ? "waiting for the HSM" : "ready", hw->name, mai_hz, mai_smp, dma_ch);
+            state == H_NO_CLOCK ? "waiting for the HSM" :
+            state == H_NO_LINK ? "waiting for active HDMI picture" : "ready",
+            hw->name, mai_hz, mai_smp, dma_ch);
 }
 
 /* ---- core 3: the mix in --------------------------------------------------- */
@@ -1290,7 +1345,15 @@ static void feed_end(struct feed *f)
 void aga_hdmi_feed(const int16_t *lr, int frames)
 {
     struct feed f;
-    if (frames <= 0 || !feed_begin(&f)) return;
+    if (frames <= 0 || !feed_begin(&f)) {
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+        ++frf_r119_audio_feed_rejects;
+#endif
+        return;
+    }
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    ++frf_r119_audio_feed_count;
+#endif
     /* the rate the frames come at (aga_audio_rate): the real Paula's,
        27,928 a second on a PAL crystal - kept at 1.112's 3546895 / 127 to
        the bit - and 27,965 on an NTSC one, where the glue now asks the mix
@@ -1345,7 +1408,15 @@ int aga_hdmi_paula_bl(void) { return paula_bl; }
 void aga_hdmi_feed_steps(const aga_step_t *s, int n, uint64_t now, uint32_t cck_hz)
 {
     struct feed f;
-    if (!feed_begin(&f)) { blep_live = 0; return; }
+    if (!feed_begin(&f)) {
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+        ++frf_r119_audio_feed_rejects;
+#endif
+        blep_live = 0; return;
+    }
+#if defined(FRF_PI4_HDMI_AUDIO_DIAG)
+    ++frf_r119_audio_feed_count;
+#endif
     if (!blep_inited) { blep_init(&blep, f.ri, now, 0); blep_inited = 1; }
     /* HDMI samples per colour clock, 32.32: fewer while the lead is long */
     uint64_t rnom = ((uint64_t)rate_hz[f.ri] << 32) / cck_hz;
