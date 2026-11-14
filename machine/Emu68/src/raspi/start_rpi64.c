@@ -255,6 +255,13 @@ extern volatile uint8_t frf_usb_boot_ready;
 extern volatile uint32_t frf_r76_usb_keyboard_count;
 extern volatile uint32_t frf_r76_usb_mouse_count;
 extern volatile uint32_t frf_r76_usb_gamepad_count;
+#if defined(FRF_PI4_USB_MASS_RO)
+extern volatile uint32_t frf_r76_usb_mass_count;
+extern volatile uint32_t frf_r112_msc_seen,frf_r112_msc_registered;
+extern volatile uint32_t frf_r112_msc_uasp;
+extern uint32_t frf_pi4_um_attempts(void);
+extern uint32_t frf_pi4_um_last_bot_error(void);
+#endif
 extern volatile uint32_t frf_r83_hid_count;
 extern volatile uint32_t frf_r97_hub_count;
 extern volatile uint32_t frf_usb_root_port_max;
@@ -314,8 +321,8 @@ static void frf_post_draw(void)
 {
     /* R107: diagnostics-only expansion; no VL805 register writes. */
     if(!frf_post_active||!framebuffer||!pitch||fb_width<360u||
-       fb_height<334u)return;
-    const int w=320,h=316,x=(int)fb_width-w-18,y=18;
+       fb_height<380u)return;
+    const int w=320,h=360,x=(int)fb_width-w-18,y=18;
     const uint16_t white=0xffffu,cyan=0x07ffu,green=0x07e0u,
                    yellow=0xffc0u,grey=0x8410u;
     frf_post_box(x,y,w,h,0x0000u);
@@ -371,6 +378,23 @@ static void frf_post_draw(void)
     frf_post_hex32(x+110,y+261,frf_usb_root_port_status,cyan);
     frf_post_text(x+12,y+281,"SDLOG:",white);
     frf_post_hex32(x+110,y+281,host_stage,host_error?yellow:cyan);
+#if defined(FRF_PI4_USB_MASS_RO)
+    /* R112: show discovery vs endpoints vs SCSI readiness separately.
+     * A spinning disk can be SEEN before READY, unlike R111's misleading 0. */
+    frf_post_text(x+12,y+301,"MSC SEEN:",white);
+    frf_post_count(x+100,y+301,frf_r112_msc_seen,cyan);
+    frf_post_text(x+132,y+301,"CFG:",white);
+    frf_post_count(x+173,y+301,frf_r112_msc_registered,cyan);
+    frf_post_text(x+204,y+301,"READY:",white);
+    frf_post_count(x+265,y+301,frf_r76_usb_mass_count,
+                   frf_r76_usb_mass_count?green:yellow);
+    frf_post_text(x+12,y+323,"UAS:",white);
+    frf_post_count(x+57,y+323,frf_r112_msc_uasp,yellow);
+    frf_post_text(x+95,y+323,"TRY:",white);
+    frf_post_count(x+138,y+323,frf_pi4_um_attempts(),cyan);
+    frf_post_text(x+172,y+323,"BOT STAGE:",white);
+    frf_post_count(x+271,y+323,frf_pi4_um_last_bot_error(),yellow);
+#endif
     __asm__ volatile("dsb ishst" ::: "memory");
 }
 void frf_boot_post_devices(void)

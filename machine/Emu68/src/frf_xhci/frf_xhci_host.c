@@ -110,10 +110,11 @@
 
 #define XHCI_RING_TRBS               256U
 #define XHCI_EVENT_TRBS              256U
-#define XHCI_MAX_SLOTS_USED          8U
-/* R97: contexts must not alias a live external hub or another HID.
- * Root/internal hub + up to two external hubs + up to 4 HIDs = 7 slots. */
-#define R97_CHILD_CONTEXT_BANKS       8U
+#define XHCI_MAX_SLOTS_USED          24U
+/* R112: allocate 24 independent child context banks and accept up to 24
+ * xHCI slots when hardware permits; a separate HID count is NOT a global
+ * USB device limit. Never alias an MSC context with HID or hub rings. */
+#define R97_CHILD_CONTEXT_BANKS       24U
 #define R97_MAX_EXTERNAL_HUBS         2U
 /* R42: R40 reports FRFXHCI_HE_SCRATCHPAD after valid VL805 PCIe caps.
  * The previous hard limit was 8 buffers; Pi4 xHCI can request more.
@@ -282,13 +283,18 @@ static uint32_t g_ep0_mps;
 /* R111: retain dedicated MSC slot after enumeration restores root EP0.
  * No xHCI controller reset or resource reuse while HID is active. */
 static uint32_t g_frf_msc_slot;
+/* R112 MSC path: independent observed/registered counters. */
+volatile uint32_t frf_r112_msc_seen,frf_r112_msc_registered;
+volatile uint32_t frf_r112_msc_uasp,frf_r112_msc_config_errors;
+volatile uint32_t frf_r112_msc_last_vidpid;
+
 static uint32_t g_bulk_in_dci;
 static uint32_t g_bulk_out_dci;
 static uint32_t g_hid_in_dci, g_hid_iface, g_hid_mps, g_hid_ready;
 /* R80: one live xHCI slot and interrupt IN ring per device, owned by CPU1.
  * Each endpoint has independent DMA, TRB producer state and report storage.
  * Do not touch the CPU0 Emu68 guest execution path. */
-#define FRF_NATIVE_HID_MAX 4U
+#define FRF_NATIVE_HID_MAX 8U
 struct NativeHID {
     uint32_t valid,slot,protocol,interface,ep,dci,mps,failures;
     uint32_t pending_length;
@@ -2572,8 +2578,9 @@ static int r97_scan_hub(struct R97HubState *hub)
     }
     hub_delay_ms(hub->power_ms);
     for(uint32_t port=1u;port<=hub->ports;port++) {
-        if(g_native_count>=FRF_NATIVE_HID_MAX ||
-           g_r97_next_bank>=R97_CHILD_CONTEXT_BANKS ||
+        /* R112: being at the HID-interface ceiling is NOT a reason to
+         * stop scanning; storage might be on any subsequent hub port. */
+        if(g_r97_next_bank>=R97_CHILD_CONTEXT_BANKS ||
            g_hub_device_count>=FRFXHCI_HUB_MAX_DEVICES) break;
         frf_r97_ext_last_port=port;
         r97_select_hub(hub);
@@ -2650,18 +2657,30 @@ static int r97_scan_hub(struct R97HubState *hub)
             continue;
         }
 #if defined(FRF_PI4_USB_MASS_RO)
+        if(d->mass_storage) {
+            ++frf_r112_msc_seen;
+            frf_r112_msc_last_vidpid=((d->vid&0xffffu)<<16)|(d->pid&0xffffu);
+        } else if(d->interface_class==USB_CLASS_MASS_STORAGE &&
+                  d->interface_protocol==0x62u) {
+            ++frf_r112_msc_uasp;
+            kprintf("[R112-MSC] UAS-only class08/06/62 VID:PID=%04x:%04x; BOT fallback required\n",
+                    d->vid,d->pid);
+        }
         if(!g_frf_msc_slot && d->mass_storage && ie && oe && im && om &&
            g_r97_next_bank<R97_CHILD_CONTEXT_BANKS) {
             if(configure_bulk_endpoints(ie,oe,im,om) &&
                frf_xhci_host_control(0x00u,USB_REQ_SET_CONFIGURATION,
                                   (uint16_t)cfg,0u,NULL,0u,0,NULL)) {
                 g_frf_msc_slot=g_slot_id;
+                ++frf_r112_msc_registered;
                 ++g_r97_next_bank;
                 kprintf("[R111-MSC] ext hub port%u slot%u VID:PID=%04x:%04x RO\n",
                         port,g_frf_msc_slot,d->vid,d->pid);
                 r97_select_hub(hub);
                 continue;
             }
+            ++frf_r112_msc_config_errors;
+            kprintf("[R112-MSC] ext hub port%u BOT config failed\n",port);
         }
 #endif
         if(r121_boot_hid_count()>=2u &&
@@ -2952,9 +2971,10 @@ static int hub_scan_children(void)
             ++g_hub_device_count;
             continue;
         }
-        if(g_native_count>=FRF_NATIVE_HID_MAX ||
-           g_r97_next_bank>=R97_CHILD_CONTEXT_BANKS) {
-            hub_copy_text(d->product,sizeof(d->product),"NATIVE USB SLOTS FULL");
+        /* An already-full HID table must not suppress a storage device
+         * connected on this port. Device contexts are a separate budget. */
+        if(g_r97_next_bank>=R97_CHILD_CONTEXT_BANKS) {
+            hub_copy_text(d->product,sizeof(d->product),"XHCI DEVICE BANKS FULL");
             ++g_hub_device_count;
             continue;
         }
@@ -3140,19 +3160,30 @@ static int hub_scan_children(void)
 #if defined(FRF_PI4_USB_MASS_RO)
         /* Configure one MSC child inline, retaining its permanent context.
          * No USB reset/readdress after other keyboard/mouse slots are live. */
+        if(d->mass_storage) {
+            ++frf_r112_msc_seen;
+            frf_r112_msc_last_vidpid=((d->vid&0xffffu)<<16)|(d->pid&0xffffu);
+        } else if(d->interface_class==USB_CLASS_MASS_STORAGE &&
+                  d->interface_protocol==0x62u) {
+            ++frf_r112_msc_uasp;
+            kprintf("[R112-MSC] UAS-only class08/06/62 VID:PID=%04x:%04x; BOT fallback required\n",
+                    d->vid,d->pid);
+        }
         if(!g_frf_msc_slot && d->mass_storage && ie && oe && im && om &&
            g_r97_next_bank<R97_CHILD_CONTEXT_BANKS) {
             if(configure_bulk_endpoints(ie,oe,im,om) &&
                frf_xhci_host_control(0x00u,USB_REQ_SET_CONFIGURATION,
                                (uint16_t)cfg,0u,NULL,0u,0,NULL)) {
                 g_frf_msc_slot=g_slot_id;
+                ++frf_r112_msc_registered;
                 ++g_r97_next_bank;
                 kprintf("[R111-MSC] hub port%u slot%u VID:PID=%04x:%04x bulk %u/%u RO\n",
                         port,g_frf_msc_slot,d->vid,d->pid,ie,oe);
                 ++g_hub_device_count;
                 continue;
             }
-            kprintf("[R111-MSC] hub port%u BOT configuration failed\n",port);
+            ++frf_r112_msc_config_errors;
+            kprintf("[R112-MSC] hub port%u BOT configuration failed\n",port);
         }
 #endif
         if(r121_boot_hid_count()>=2u &&
@@ -3166,7 +3197,8 @@ static int hub_scan_children(void)
             ++g_hub_device_count;
             continue;
         }
-        int usable_hid=he && hm && hiface!=0xffffffffu &&
+        int usable_hid=(g_native_count<FRF_NATIVE_HID_MAX) &&
+            he && hm && hiface!=0xffffffffu &&
             d->interface_class==USB_CLASS_HID &&
             (d->interface_protocol==USB_HID_PROTOCOL_KEYBOARD ||
              d->interface_protocol==USB_HID_PROTOCOL_MOUSE ||
@@ -3567,6 +3599,9 @@ static int host_scan_cpu1(void)
     g_slot_id = 0;
     g_bulk_in_dci = g_bulk_out_dci = 0;
     g_frf_msc_slot=0u;
+    frf_r112_msc_seen=frf_r112_msc_registered=0u;
+    frf_r112_msc_uasp=frf_r112_msc_config_errors=0u;
+    frf_r112_msc_last_vidpid=0u;
     hub_zero_devices();
     g_route_string = 0U; g_root_hub_port = 1U; g_selected_root_port=1U;
     g_slot_hub = g_slot_num_ports = 0U;
@@ -3624,6 +3659,15 @@ static int host_scan_cpu1(void)
     }
 
 
+#if defined(FRF_PI4_USB_MASS_RO)
+    /* HID and MSC coexist on different xHCI slots. Do not allow the
+     * "multi-device HID active" host_info reset to erase the MSC state. */
+    if(g_frf_msc_slot)g_host.msc_ready=1u;
+    kprintf("[R112-MSC] enumeration seen=%u configured=%u UAS=%u cfgErrors=%u slot=%u HIDs=%u totalChild=%u\n",
+            frf_r112_msc_seen,frf_r112_msc_registered,
+            frf_r112_msc_uasp,frf_r112_msc_config_errors,
+            g_frf_msc_slot,g_native_count,g_hub_device_count);
+#endif
     /* A non-storage HID/etc. device is still a successful enumeration. */
     if (g_host.msc_ready)
         (void)frf_usb_boot_cpu1_scan();

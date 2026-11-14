@@ -15,18 +15,18 @@ struct Pad {
   unsigned shanwan,switch_pro;
   struct Field x,y,extra_x,extra_y,hat;
 };
-static struct Pad pads[4];
-static uint32_t pad_vid[4],pad_pid[4];
+static struct Pad pads[8];
+static uint32_t pad_vid[8],pad_pid[8];
 
 void frf_native_usb_pad_set_identity_for(unsigned index,uint32_t vid,uint32_t pid)
 {
-  if(index>=4u)return;
+  if(index>=8u)return;
   pad_vid[index]=vid;pad_pid[index]=pid;
   pads[index].valid=0u;
 }
 int frf_native_usb_pad_enable_switchpro_for(unsigned index)
 {
-  if(index>=4u || pad_vid[index]!=0x057eu || pad_pid[index]!=0x2009u)
+  if(index>=8u || pad_vid[index]!=0x057eu || pad_pid[index]!=0x2009u)
     return 0;
   pads[index]=(struct Pad){0};
   pads[index].valid=1u;
@@ -38,7 +38,7 @@ int frf_native_usb_pad_enable_switchpro_for(unsigned index)
 }
 int frf_native_usb_pad_enable_shanwan_for(unsigned index)
 {
-  if(index>=4u || pad_vid[index]!=0x2563u || pad_pid[index]!=0x0576u)return 0;
+  if(index>=8u || pad_vid[index]!=0x2563u || pad_pid[index]!=0x0576u)return 0;
   pads[index]=(struct Pad){0};
   pads[index].valid=1u;
   pads[index].shanwan=1u;
@@ -84,7 +84,7 @@ static int scale_axis(const struct Field *f,const uint8_t *bytes,unsigned len)
 int frf_native_usb_pad_set_descriptor_for(unsigned index,const uint8_t *b,unsigned len)
 {
   struct Pad out={0};
-  if(index>=4u || !b || len<8u || len>2048u) return 0;
+  if(index>=8u || !b || len<8u || len>2048u) return 0;
   /* Pi3 compatibility uses VID:PID-selected 10B Report ID1 layout.
      Report ID5 is a different HID mouse and must never be mapped to JOY1. */
   if(pad_vid[index]==0x2563u && pad_pid[index]==0x0576u)
@@ -190,7 +190,7 @@ int frf_native_usb_pad_set_descriptor(const uint8_t *b,unsigned len)
 }
 int frf_native_usb_pad_report_for(unsigned index,const uint8_t *b,unsigned len)
 {
-  if(index>=4u || !pads[index].valid || !b || !len || len>64u) return 0;
+  if(index>=8u || !pads[index].valid || !b || !len || len>64u) return 0;
   const struct Pad *pad=&pads[index];
   if(pad->switch_pro) {
     /* Nintendo USB 057e:2009, reports 0x30 and 0x21 share the same
