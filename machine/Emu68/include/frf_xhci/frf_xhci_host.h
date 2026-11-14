@@ -133,7 +133,7 @@ int frf_xhci_host_bulk_out(const void *data, uint32_t length, uint32_t *actual);
 
 
 /* FRF_CPU1_USB_HUB_SELFCONTAINED_V0_5_5: one-tier boot enumeration telemetry. */
-#define FRFXHCI_HUB_MAX_DEVICES 8U
+#define FRFXHCI_HUB_MAX_DEVICES 24U
 struct FRFXHCIHubDeviceInfo {
     uint32_t valid;
     uint32_t hub_port;

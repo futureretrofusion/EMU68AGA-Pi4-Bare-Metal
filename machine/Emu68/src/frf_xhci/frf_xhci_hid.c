@@ -19,9 +19,9 @@ extern void frf_post_usb_devices(unsigned kb, unsigned ms, unsigned gp, unsigned
 /* Pi3-compatible HID report-ID discovery for keyboard and mouse.
  * Parse HID short items and application collections, never guess that the
  * first byte is a report ID without descriptor evidence. */
-static uint8_t frf_pi4_hid_report_id[4];
-static uint8_t frf_pi4_hid_has_id[4];
-static uint16_t frf_pi4_hid_vid[4],frf_pi4_hid_pid[4];
+static uint8_t frf_pi4_hid_report_id[8];
+static uint8_t frf_pi4_hid_has_id[8];
+static uint16_t frf_pi4_hid_vid[8],frf_pi4_hid_pid[8];
 static uint8_t frf_pi4_hid_descriptor[512] __attribute__((aligned(64)));
 static uint8_t frf_pi4_find_report_id(const uint8_t *desc,unsigned len,unsigned proto)
 {
@@ -144,6 +144,7 @@ extern void frf_xhci_host_diag_snapshot_cpu1(void);
 extern void frf_pi4_um_init(void);
 extern void frf_pi4_um_service(void);
 extern uint32_t frf_pi4_um_capacity(void);
+extern void frf_pi4_um_retry(uint64_t now,uint64_t hz);
 #endif
 void frf_pi4_xhci_hid_main(void)
 {
@@ -171,14 +172,14 @@ void frf_pi4_xhci_hid_main(void)
     int scanned=frf_xhci_host_hid_scan_cpu1();
     uint32_t count=scanned?frf_xhci_host_native_count():0u;
     unsigned keyboard=0u, mouse=0u, gamepad=0u;
-    uint8_t pad_ready[4]={0};
-    for(unsigned j=0;j<4u;j++) {
+    uint8_t pad_ready[8]={0};
+    for(unsigned j=0;j<8u;j++) {
         frf_pi4_hid_report_id[j]=0u;
         frf_pi4_hid_has_id[j]=0u;
         frf_pi4_hid_vid[j]=frf_pi4_hid_pid[j]=0u;
     }
 
-    if(count>4u)count=4u;
+    if(count>8u)count=8u;
     for(uint32_t i=0u;i<count;i++) {
         uint32_t proto=255u,iface=0u;
         if(!frf_xhci_host_native_info(i,&proto,&iface))continue;
@@ -257,6 +258,13 @@ void frf_pi4_xhci_hid_main(void)
 #if defined(FRF_PI4_USB_MASS_RO)
     frf_pi4_um_init();
 #endif
+#if defined(FRF_PI4_USB_MASS_RO)
+    kprintf("[R112-USB] HID interfaces=%u keyboard=%u mouse=%u gamepad=%u storage=%u\n",
+            count,keyboard,mouse,gamepad,frf_pi4_um_capacity()?1u:0u);
+#else
+    kprintf("[R112-USB] HID interfaces=%u keyboard=%u mouse=%u gamepad=%u (no MSC build)\n",
+            count,keyboard,mouse,gamepad);
+#endif
     frf_xhci_host_diag_snapshot_cpu1();
     __atomic_store_n(&frf_r58_hid_ready,(keyboard+mouse+gamepad)?1u:0u,__ATOMIC_RELEASE);
     __atomic_store_n(&frf_usb_mouse_present,mouse?1u:0u,__ATOMIC_RELEASE);
@@ -293,6 +301,7 @@ void frf_pi4_xhci_hid_main(void)
     for(;;) {
 #if defined(FRF_PI4_USB_MASS_RO)
         frf_pi4_um_service();
+        frf_pi4_um_retry(log_now,log_hz);
 #endif
         /* The Pi3 host reboot uses aga_reboot(0); here this path is
            CPU1-only and works whether the guest is in AGS, Workbench
