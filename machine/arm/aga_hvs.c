@@ -1735,9 +1735,21 @@ static void r94_post_panel(uint32_t *dst)
     extern volatile uint32_t frf_r76_usb_mass_count;
     extern volatile uint32_t frf_r112_msc_seen,frf_r112_msc_registered;
     extern volatile uint32_t frf_r112_msc_uasp,frf_r112_msc_config_errors;
+#if !defined(FRF_PI4_LEGACY_REV_DIAG)
     extern volatile uint32_t frf_r112_msc_last_vidpid;
+#endif
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    extern volatile uint32_t frf_r117_board_revision;
+    extern volatile uint32_t frf_r117_board_pcb,frf_r117_board_ram_code;
+    extern volatile uint32_t frf_r117_legacy_recover_stage;
+    extern volatile uint32_t frf_r117_pcie_link_status;
+    extern volatile uint32_t frf_usb_fw_before,frf_usb_fw_after;
+    extern volatile uint32_t frf_r55_dma_bad;
+#endif
+#if !defined(FRF_PI4_LEGACY_REV_DIAG)
     extern volatile uint32_t frf_r115_scan_port,frf_r115_scan_depth;
     extern volatile uint32_t frf_r115_scan_budget_hit,frf_r115_scan_child_count;
+#endif
     extern volatile uint32_t frf_usb_host_phase,frf_sdlog_xhci_stage;
     extern volatile uint32_t frf_sdlog_xhci_error,frf_r58_hid_last_size;
     extern volatile uint32_t frf_r58_hid_raw,frf_r58_hid_buttons;
@@ -1756,7 +1768,11 @@ static void r94_post_panel(uint32_t *dst)
     ovl_fill(dst,x,y,w,h,R94_POST_BG);
     ovl_fill(dst,x,y,w,2,cyan);
     ovl_fill(dst,x,y+h-2,w,2,cyan);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R117 LEGACY USB",cyan);
+#else
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R115 LIVE USB POST",cyan);
+#endif
     r94_post_text(dst,x+8,y+ym+16*1,"HOST:",white);
     r94_post_text(dst,x+62,y+ym+16*1,frf_usb_boot_ready?"RUN":"SCAN",
                   frf_usb_boot_ready?green:amber);
@@ -1770,6 +1786,29 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_dec(dst,x+196,y+ym+16*2,frf_r76_usb_mouse_count,green);
     r94_post_text(dst,x+232,y+ym+16*2,"GP:",white);
     r94_post_dec(dst,x+266,y+ym+16*2,frf_r76_usb_gamepad_count,green);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    /* R117: three rows for Pi4B rev1.1 vs 1.5 comparison. Still inside
+     * the proven 800x286 renderer. PCB nibble '1' denotes revision 1.1.
+     * RAM code=4 means 4GiB and RAM code=2 means 1GiB. */
+    r94_post_text(dst,x+8,y+ym+16*3,"BOARD:",white);
+    r94_post_hex(dst,x+67,y+ym+16*3,frf_r117_board_revision,8,cyan);
+    r94_post_text(dst,x+178,y+ym+16*3,"PCB:1.",white);
+    r94_post_hex(dst,x+230,y+ym+16*3,frf_r117_board_pcb,1,cyan);
+    r94_post_text(dst,x+260,y+ym+16*3,"RAM:",white);
+    r94_post_hex(dst,x+305,y+ym+16*3,frf_r117_board_ram_code,1,cyan);
+    r94_post_text(dst,x+8,y+ym+16*4,"FW PRE:",white);
+    r94_post_hex(dst,x+70,y+ym+16*4,frf_usb_fw_before,8,cyan);
+    r94_post_text(dst,x+158,y+ym+16*4,"POST:",white);
+    r94_post_hex(dst,x+211,y+ym+16*4,frf_usb_fw_after,8,cyan);
+    r94_post_text(dst,x+8,y+ym+16*5,"PCIE:",white);
+    r94_post_hex(dst,x+58,y+ym+16*5,frf_r117_pcie_link_status,8,cyan);
+    r94_post_text(dst,x+145,y+ym+16*5,"REC:",white);
+    r94_post_hex(dst,x+189,y+ym+16*5,frf_r117_legacy_recover_stage,2,
+                 frf_r117_legacy_recover_stage==3u?amber:green);
+    r94_post_text(dst,x+235,y+ym+16*5,"DMA:",white);
+    r94_post_hex(dst,x+281,y+ym+16*5,frf_r55_dma_bad,4,
+                 frf_r55_dma_bad?amber:cyan);
+#else
     r94_post_text(dst,x+8,y+ym+16*3,"SCAN DEPTH:",white);
     r94_post_hex(dst,x+122,y+ym+16*3,frf_r115_scan_depth,2,cyan);
     r94_post_text(dst,x+161,y+ym+16*3,"PORT:",white);
@@ -1785,14 +1824,22 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_hex(dst,x+200,y+ym+16*5,frf_r115_scan_child_count,2,cyan);
     r94_post_text(dst,x+239,y+ym+16*5,"HE:",white);
     r94_post_hex(dst,x+283,y+ym+16*5,frf_r97_ext_error,2,amber);
+#endif
     r94_post_text(dst,x+8,y+ym+16*6,"MSC SEEN",white);
     r94_post_hex(dst,x+88,y+ym+16*6,seen,2,seen?green:amber);
     r94_post_text(dst,x+128,y+ym+16*6,"CFG",white);
     r94_post_hex(dst,x+163,y+ym+16*6,configured,2,configured?green:amber);
     r94_post_text(dst,x+201,y+ym+16*6,"READY",white);
     r94_post_hex(dst,x+258,y+ym+16*6,ready,2,ready?green:amber);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    r94_post_text(dst,x+8,y+ym+16*7,"XHCI STAGE:",white);
+    r94_post_hex(dst,x+151,y+ym+16*7,frf_sdlog_xhci_stage,8,cyan);
+    r94_post_text(dst,x+257,y+ym+16*7,"HUB:",white);
+    r94_post_dec(dst,x+301,y+ym+16*7,frf_r97_hub_count,cyan);
+#else
     r94_post_text(dst,x+8,y+ym+16*7,"MSC VID:PID:",white);
     r94_post_hex(dst,x+140,y+ym+16*7,frf_r112_msc_last_vidpid,8,cyan);
+#endif
     r94_post_text(dst,x+8,y+ym+16*8,"MSC SLOT:",white);
     r94_post_hex(dst,x+109,y+ym+16*8,frf_xhci_host_msc_slot(),2,cyan);
     r94_post_text(dst,x+172,y+ym+16*8,"UAS:",white);
@@ -1813,8 +1860,24 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_hex(dst,x+110,y+ym+16*12,frf_usb_host_phase,2,cyan);
     r94_post_text(dst,x+164,y+ym+16*12,"HID ERR:",white);
     r94_post_hex(dst,x+253,y+ym+16*12,frf_r99_hid_error_count,2,amber);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    /* When the old 4GB Pi4B detects no HID, show root USB power/link
+     * telemetry instead of the guaranteed-zero mouse report. */
+    if(frf_r117_board_revision && !frf_r76_usb_keyboard_count &&
+       !frf_r76_usb_mouse_count) {
+        extern volatile uint32_t frf_r99_root_status;
+        r94_post_text(dst,x+8,y+ym+16*13,"ROOT:",white);
+        r94_post_hex(dst,x+60,y+ym+16*13,frf_r99_root_status,8,cyan);
+        r94_post_text(dst,x+164,y+ym+16*13,"P1:",white);
+        extern volatile uint32_t frf_r117_final_portsc;
+        r94_post_hex(dst,x+202,y+ym+16*13,frf_r117_final_portsc,8,cyan);
+    } else {
+#endif
     r94_post_text(dst,x+8,y+ym+16*13,"MOUSE RAW:",white);
     r94_post_hex(dst,x+140,y+ym+16*13,frf_r58_hid_raw,8,cyan);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    }
+#endif
     r94_post_text(dst,x+8,y+ym+16*14,"BTN:",white);
     r94_post_hex(dst,x+51,y+ym+16*14,mouse_btn,2,mouse_btn&2u?green:cyan);
     r94_post_text(dst,x+101,y+ym+16*14,"L:",white);
@@ -1826,10 +1889,23 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_text(dst,x+184,y+ym+16*15,"RMB:",white);
     r94_post_hex(dst,x+230,y+ym+16*15,(guest&0x0400u)?0u:1u,2,
                  (guest&0x0400u)?amber:green);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    if(frf_r117_board_revision &&
+       !frf_r76_usb_keyboard_count && !frf_r76_usb_mouse_count) {
+        extern volatile uint32_t frf_r117_fw_reset_rc,frf_usb_caps_raw;
+        r94_post_text(dst,x+8,y+ym+16*16,"FWRC:",white);
+        r94_post_hex(dst,x+57,y+ym+16*16,frf_r117_fw_reset_rc,8,cyan);
+        r94_post_text(dst,x+162,y+ym+16*16,"CAPS:",white);
+        r94_post_hex(dst,x+212,y+ym+16*16,frf_usb_caps_raw,8,cyan);
+    } else {
+#endif
     r94_post_text(dst,x+8,y+ym+16*16,"MOUSE BYTES:",white);
     r94_post_hex(dst,x+132,y+ym+16*16,frf_r58_hid_last_size,2,cyan);
     r94_post_text(dst,x+186,y+ym+16*16,"PAD RX:",white);
     r94_post_hex(dst,x+258,y+ym+16*16,frf_native_usb_pad_reports,4,cyan);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    }
+#endif
 #else
 #if defined(FRF_PI4_MOUSE_DIAG)
     const int w=310,x=AGA_OUT_W-w-7,y=8,h=337;

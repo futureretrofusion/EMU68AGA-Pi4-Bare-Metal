@@ -13,6 +13,9 @@
 #include "support_rpi.h"
 #include "frf_services.h"
 #include "frf_xhci_probe.h"
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+#include "frf_pi4_legacy_profile.h"
+#endif
 
 #define PCIE_RGR1_SW_INIT_1             0x9210u
 #define PCIE_SW_INIT                    (1u << 1)
@@ -89,6 +92,39 @@ volatile uint32_t frf_usb_fw_after;
 volatile uint32_t frf_usb_reset_rc;
 volatile uint32_t frf_usb_caps_reads;
 volatile uint32_t frf_usb_caps_raw;
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+/* R117: hardware revision is supplied in firmware device tree by
+ * /system/linux,revision. Never query shared ARM mailbox from CPU1 just
+ * to detect a board; CPU0 and other services can be using it. */
+volatile uint32_t frf_r117_board_revision;
+volatile uint32_t frf_r117_board_type,frf_r117_board_pcb,frf_r117_board_ram_code;
+volatile uint32_t frf_r117_legacy_vl805;
+volatile uint32_t frf_r117_pcie_link_status,frf_r117_pcie_rc_rev;
+volatile uint32_t frf_r117_legacy_recover_stage,frf_r117_fw_reset_rc;
+volatile uint32_t frf_r117_initial_caps_ok,frf_r117_final_portsc;
+static uint32_t r117_dt_revision(void)
+{
+    of_node_t *system=dt_find_node("/system");
+    if (!system)return 0u;
+    of_property_t *prop=dt_find_property(system,"linux,revision");
+    if(!prop || !prop->op_value || prop->op_length<4u)return 0u;
+    return BE32(*(const uint32_t *)(const void *)prop->op_value);
+}
+static void r117_board_profile(void)
+{
+    const uint32_t revision=r117_dt_revision();
+    frf_r117_board_revision=revision;
+    frf_r117_board_type=(revision>>4u)&0xffu;
+    frf_r117_board_pcb=revision&15u;
+    frf_r117_board_ram_code=(revision>>20u)&7u;
+    /* Do not reject new board revisions; only handle the two boards with
+     * separate VL805 EEPROM (Pi4B rev1.1 and rev1.2). Unknown returns 0. */
+    frf_r117_legacy_vl805=frf_pi4_legacy_vl805_eeprom(revision);
+    kprintf("[R117-LEGACY] board=%08x type=%02x pcb=1.%u ramcode=%u earlyVL805=%u\n",
+            revision,frf_r117_board_type,frf_r117_board_pcb,
+            frf_r117_board_ram_code,frf_r117_legacy_vl805);
+}
+#endif
 /* R46: inbound PCIe DMA window needed for VL805 to fetch rings in RAM.
  * Readbacks are from BCM2711 RC MMIO, not synthetic expected values. */
 volatile uint32_t frf_usb_dma_rc_bar2_before,frf_usb_dma_rc_bar2_after;
@@ -560,6 +596,15 @@ const volatile struct FRFXHCIProbeInfo *frf_xhci_probe_info(void) { return &g_xh
 uint32_t frf_xhci_probe_run(void)
 {
     reset_info(g_xhci.probes+1u);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    r117_board_profile();
+    frf_r117_legacy_recover_stage=0u;
+    frf_r117_initial_caps_ok=0u;
+    frf_r117_final_portsc=0u;
+    frf_r117_fw_reset_rc=0x7fffffffu;
+    frf_r117_pcie_link_status=0u;
+    frf_r117_pcie_rc_rev=0u;
+#endif
     of_node_t *pcie=dt_find_node("/scb/pcie@7d500000");
     if (!pcie) {
         g_xhci.status=FRFXHCI_PROBE_NO_DT_NODE; frf_pci_ro_probe_status=g_xhci.status;
@@ -586,6 +631,10 @@ uint32_t frf_xhci_probe_run(void)
         return g_xhci.status;
     }
 
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    frf_r117_pcie_link_status=mmio_read32(rc,PCIE_STATUS);
+    frf_r117_pcie_rc_rev=mmio_read32(rc,PCIE_REVISION);
+#endif
     frf_r55_dma_cpu_base=dma.phys;
     frf_r55_dma_bus_base=dma.bus;
     frf_r55_dma_window_size=dma.size;
@@ -646,6 +695,48 @@ uint32_t frf_xhci_probe_run(void)
         if (caps_ok) break;
         delay_us_local(1000u);
     }
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    frf_r117_initial_caps_ok=caps_ok?1u:0u;
+    /* The original 4GB Pi4B rev1.1 has a dedicated VL805 EEPROM.
+     * Only when the PCI config reports nonzero firmware but MMIO xHCI
+     * capabilities are unusable may one firmware-notify recovery occur.
+     * A working endpoint is NEVER reset. On new Pi4B rev1.5, no recovery.
+     * If R115 already notified because version was zero, do not do it
+     * again here (avoids repeated reset loops). */
+    if(!caps_ok && frf_r117_legacy_vl805 && frf_usb_fw_before!=0u) {
+        frf_r117_legacy_recover_stage=1u;
+        const int fw=frf_notify_xhci_reset(0x00100000u);
+        frf_r117_fw_reset_rc=(uint32_t)fw;
+        if(fw==0) {
+            delay_us_local(150000u);
+            /* Firmware may have reset VL805 endpoint BAR/MEM decoding.
+             * Restore the already verified mapping; never assert PERST or
+             * modify EEPROM/bootloader. */
+            cfg_write32(rc,1,0,0,PCI_BAR0,frf_usb_endpoint_bar);
+            uint16_t cmd=cfg_read16(rc,1,0,0,PCI_COMMAND);
+            cfg_write16(rc,1,0,0,PCI_COMMAND,
+                        (uint16_t)(cmd|PCI_COMMAND_MEMORY|PCI_COMMAND_MASTER));
+            frf_usb_endpoint_command=cfg_read16(rc,1,0,0,PCI_COMMAND);
+            for (unsigned tries=0u;tries<100u;tries++) {
+                ++frf_usb_caps_reads;
+                caps_ok=caps_snapshot(xhci,bytes,&cb,&hs,&hc,&db,&rt,
+                                      &slots,&intrs,&ports,&ver);
+                frf_usb_caps_raw=cb;
+                if (caps_ok)break;
+                delay_us_local(1000u);
+            }
+            frf_usb_fw_after=cfg_read32(rc,1,0,0,VL805_PCI_FW_VERSION);
+        }
+        frf_r117_legacy_recover_stage=caps_ok?2u:3u;
+        kprintf("[R117-LEGACY] guarded recovery stage=%u fwrc=%d caps=%u fw=%08x\n",
+                frf_r117_legacy_recover_stage,fw,caps_ok,frf_usb_fw_after);
+    }
+    /* Earlier VL805 revisions may require extra EEPROM/port settle after
+     * PCIe enumeration. Only affects early Pi4B and only before USB rings
+     * or HID endpoints exist. Normal rev1.5 path is byte-for-byte same. */
+    if(caps_ok && frf_r117_legacy_vl805)
+        delay_us_local(150000u);
+#endif
     g_xhci.bus_base=barbus;
     g_xhci.virt_base=(uint32_t)xhci;
     g_xhci.reg_bytes=bytes;
@@ -670,6 +761,9 @@ uint32_t frf_xhci_probe_run(void)
     g_xhci.access_mode=FRFXHCI_ACCESS_DEVICE32;
     uint32_t caplen=cb&0xffu;
     g_xhci.portsc1=mmio_read32(xhci,caplen+XHCI_OP_PORTSC1);
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    frf_r117_final_portsc=g_xhci.portsc1;
+#endif
     g_xhci.state=FRFS_USB_BACKEND_PROBED;
     g_xhci.status=FRFXHCI_PROBE_OK; frf_pci_ro_probe_status=g_xhci.status;
     frf_services_usb_backend_state(FRFS_USB_BACKEND_PROBED);

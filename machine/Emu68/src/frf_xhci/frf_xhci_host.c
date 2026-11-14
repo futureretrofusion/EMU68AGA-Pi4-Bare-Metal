@@ -2873,7 +2873,16 @@ static int hub_scan_children(void)
      * seconds on CPU1. CPU0 Amiga boot is independent. Once this expires,
      * finish with the already configured input/storage slots and begin
      * serving them. Do not reset the root hub or any live child. */
+#if defined(FRF_PI4_LEGACY_REV_DIAG)
+    extern volatile uint32_t frf_r117_legacy_vl805;
+    /* Older VL805 EEPROMs can take longer to finish USB2 hub startup.
+     * Extend only the diagnostic enumeration budget on early revisions;
+     * CPU0/Amiga boot remains independent. */
+    frf_r115_scan_deadline=host_deadline_ms(frf_r117_legacy_vl805?
+                                           16000u:12000u);
+#else
     frf_r115_scan_deadline=host_deadline_ms(12000u);
+#endif
 #endif
     g_root_hub_slot = g_slot_id;
     g_root_hub_speed = g_port_speed;
