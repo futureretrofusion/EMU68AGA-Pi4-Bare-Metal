@@ -203,12 +203,23 @@ void aga_virtual_mouse_update(int dx, int dy, unsigned buttons)
     __atomic_store_n(&frf_joydat[0],
                      (uint16_t)(((uint16_t)frf_mouse_y << 8) | frf_mouse_x),
                      __ATOMIC_RELEASE);
-    frf_mouse_buttons = (uint8_t)buttons;
+    __atomic_store_n(&frf_mouse_buttons,(uint8_t)buttons,__ATOMIC_RELEASE);
     if (buttons & 1u) __atomic_fetch_or(&frf_fire_bits, 1u, __ATOMIC_ACQ_REL);
     else              __atomic_fetch_and(&frf_fire_bits, (uint8_t)~1u, __ATOMIC_ACQ_REL);
 }
 #endif
 
+#if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_VIRTUAL_AGA)
+static uint16_t hook_ext_read(void *u, uint32_t reg);
+uint32_t frf_pi4_guest_mouse_button_snapshot(void)
+{
+    /* Sample the EXACT emulated POTGOR provider, including POTGO output
+     * ownership and pad pins, so USB and guest states are comparable.
+     * No MMIO, guest-memory access, or writes. */
+    uint32_t buttons=__atomic_load_n(&frf_mouse_buttons,__ATOMIC_ACQUIRE);
+    return (buttons<<16) | hook_ext_read(NULL,POTGOR);
+}
+#endif
 static uint16_t hook_ext_read(void *u, uint32_t reg)
 {
     (void)u;

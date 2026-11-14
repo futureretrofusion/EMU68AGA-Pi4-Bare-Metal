@@ -1725,7 +1725,11 @@ static void r94_post_dec(uint32_t *dst,int x,int y,uint32_t v,uint32_t col)
 }
 static void r94_post_panel(uint32_t *dst)
 {
+#if defined(FRF_PI4_MOUSE_DIAG)
+    const int w=310,x=AGA_OUT_W-w-7,y=8,h=337;
+#else
     const int w=310,x=AGA_OUT_W-w-7,y=8,h=269;
+#endif
     const uint32_t count_kb=frf_r76_usb_keyboard_count;
     const uint32_t count_mouse=frf_r76_usb_mouse_count;
     const uint32_t count_gamepad=frf_r76_usb_gamepad_count;
@@ -1793,6 +1797,32 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_hex(dst,x+204,y+249,frf_r99_ring_swaps,2,cyan);
     r94_post_text(dst,x+238,y+249,"AGE:",cyan);
     r94_post_hex(dst,x+277,y+249,frf_r99_hid_last_age_seconds,2,cyan);
+#if defined(FRF_PI4_MOUSE_DIAG)
+    extern volatile uint32_t frf_r58_hid_raw,frf_r58_hid_buttons;
+    extern volatile uint32_t frf_r58_hid_click_l,frf_r58_hid_click_r;
+    extern volatile uint32_t frf_r58_hid_last_size;
+    extern uint32_t frf_pi4_guest_mouse_button_snapshot(void);
+    const uint32_t raw=__atomic_load_n(&frf_r58_hid_raw,__ATOMIC_ACQUIRE);
+    const uint32_t mask=__atomic_load_n(&frf_r58_hid_buttons,__ATOMIC_ACQUIRE);
+    const uint32_t l=__atomic_load_n(&frf_r58_hid_click_l,__ATOMIC_ACQUIRE);
+    const uint32_t right_count=__atomic_load_n(&frf_r58_hid_click_r,__ATOMIC_ACQUIRE);
+    const uint32_t guest=frf_pi4_guest_mouse_button_snapshot();
+    r94_post_text(dst,x+9,y+269,"USB MOUSE RAW:",white);
+    r94_post_hex(dst,x+145,y+269,raw,8,cyan);
+    r94_post_text(dst,x+9,y+286,"BTN:",white);
+    r94_post_hex(dst,x+50,y+286,mask,2,mask&2u?green:amber);
+    r94_post_text(dst,x+89,y+286,"L:",white);
+    r94_post_hex(dst,x+113,y+286,l,4,cyan);
+    r94_post_text(dst,x+164,y+286,"R:",white);
+    r94_post_hex(dst,x+188,y+286,right_count,4,right_count?green:amber);
+    r94_post_text(dst,x+9,y+303,"AMIGA POTGOR:",white);
+    r94_post_hex(dst,x+140,y+303,guest&0xffffu,4,cyan);
+    r94_post_text(dst,x+195,y+303,"RMB:",white);
+    r94_post_hex(dst,x+243,y+303,(guest&0x0400u)?0u:1u,2,
+                 (guest&0x0400u)?amber:green);
+    r94_post_text(dst,x+9,y+320,"HID REPORT BYTES:",white);
+    r94_post_hex(dst,x+180,y+320,frf_r58_hid_last_size,2,cyan);
+#endif
 }
 #endif
 
