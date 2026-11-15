@@ -35,6 +35,7 @@
 #include "frf_services.h"
 #include "frf_xhci_probe.h"
 #include "frf_xhci_host.h"
+#include "frf_r129_wireless_policy.h"
 #include "frf_native_usb_input.h"
 #include "frf_usb_boot.h"
 
@@ -252,6 +253,11 @@ static void frf_r58_note_event(uint32_t status,uint32_t control);
 volatile uint32_t frf_r55_sts[12];
 volatile uint32_t frf_r55_first_hse;
 volatile uint32_t frf_r55_dma_bad;
+/* Legacy Pi4 R126: failure evidence, diagnostic-only; never bypass
+ * the out-of-window guard and never alter PCIe firmware/hardware.
+ * Capture first rejected pointer and reason before returning UINT64_MAX. */
+volatile uint64_t frf_r126_dma_bad_pa,frf_r126_dma_bad_va;
+volatile uint32_t frf_r126_dma_bad_reason,frf_r126_dma_bad_count;
 volatile uint64_t frf_r55_phys_cmd,frf_r55_phys_evt,frf_r55_phys_dcbaa,frf_r55_phys_erst;
 volatile uint64_t frf_r55_bus_cmd,frf_r55_bus_evt,frf_r55_bus_dcbaa,frf_r55_bus_erst;
 extern volatile uint64_t frf_r55_dma_cpu_base,frf_r55_dma_bus_base,frf_r55_dma_window_size;
@@ -321,6 +327,7 @@ struct NativeHID {
        completions from a stopped ring can never match the first new TD
        after reset; h->bank indexes xHCI DMA contexts, not HID devices. */
     uint32_t ring_bank,ring_epoch;
+    uint32_t idle_noted;  /* R129: one diagnostic per outstanding idle TD */
     uint64_t retry_after_cnt,pending_since_cnt;
     uint64_t pending;
     struct XHCIRing ring,ep0;
@@ -329,6 +336,34 @@ struct NativeHID {
 static struct NativeHID g_native_hid[FRF_NATIVE_HID_MAX] __attribute__((aligned(64)));
 static uint32_t g_native_count, g_native_bank;
 static uint32_t g_r97_next_bank;
+volatile uint32_t frf_r130_pad_discovered,frf_r130_pad_vidpid;
+/* R130: publish one HID discovery milestone at registration time,
+ * not only after the entire (up to 12 second) hub scan completes.
+ * This is POST telemetry ONLY. Gamepad candidates are not considered
+ * parsed/ready until CPU1 reads and accepts their HID descriptor.
+ * Never reset/disable any xHCI slot or block CPU0 for POST updates.
+ * Root hub, cascaded hub and composite paths share this single helper. */
+static void frf_r130_post_hid_discovered(void)
+{
+#if defined(FRF_BOOT_POST)
+    extern void frf_post_usb_devices(unsigned,unsigned,unsigned,unsigned);
+    unsigned kb=0u,mouse=0u,pad=0u;
+    for(uint32_t i=0u;i<g_native_count;i++) {
+        const struct NativeHID *h=&g_native_hid[i];
+        if(!h->valid)continue;
+        if(h->protocol==USB_HID_PROTOCOL_KEYBOARD)++kb;
+        else if(h->protocol==USB_HID_PROTOCOL_MOUSE)++mouse;
+        else if(h->protocol==0u) {
+            ++pad;
+            frf_r130_pad_vidpid=((h->vid&0xffffu)<<16)|(h->pid&0xffffu);
+        }
+    }
+    __atomic_store_n(&frf_r130_pad_discovered,pad,__ATOMIC_RELEASE);
+    extern volatile uint32_t frf_r76_usb_mass_count;
+    frf_post_usb_devices(kb,mouse,pad,frf_r76_usb_mass_count);
+#endif
+}
+
 /* The Pi3 v1.121 TinyUSB mount callback registers HID *interfaces*, not
  * USB devices. Preserve this distinction for Pi4 composite receivers. */
 #define R121_HID_IF_MAX 4U
@@ -455,6 +490,13 @@ volatile uint32_t frf_r92_last_cc[FRF_NATIVE_HID_MAX];
 volatile uint32_t frf_r92_recovery_ok[FRF_NATIVE_HID_MAX];
 volatile uint32_t frf_r92_deferred_events,frf_r92_deferred_overflow;
 volatile uint32_t frf_r92_silent_timeout[FRF_NATIVE_HID_MAX];
+/* R129: a 10s gamepad NAK is normal, NOT a reason to stop/reset endpoint.
+ * Counter increments once for each genuinely idle pending TD. */
+volatile uint32_t frf_r129_gamepad_idle_kept;
+/* R129: suppress disconnection caused by powering off a hub port
+ * during a local address retry. Includes failures on shared-power hubs. */
+volatile uint32_t frf_r129_port_power_off_avoided;
+volatile uint32_t frf_r129_pad_recovery_kept_state;
 
 /* A synchronous command during live HID polling can race completions from
    other devices. Retain their xHCI transfer events rather than silently
@@ -620,8 +662,17 @@ static uint64_t host_dma(const void *ptr)
     const uint64_t bus=frf_r55_dma_bus_base;
     const uint64_t sz=frf_r55_dma_window_size;
     if (!sz || pa < cpu || pa-cpu >= sz || bus > UINT64_MAX-(pa-cpu)) {
+        /* Reason 1: zero dma-ranges span; 2: below CPU base;
+         * 3: beyond DMA span; 4: bus address overflow. */
+        uint32_t why=!sz?1u:(pa<cpu)?2u:(pa-cpu>=sz)?3u:4u;
+        if (!frf_r126_dma_bad_count) {
+            frf_r126_dma_bad_pa=pa;
+            frf_r126_dma_bad_va=(uint64_t)(uintptr_t)ptr;
+            frf_r126_dma_bad_reason=why;
+        }
+        ++frf_r126_dma_bad_count;
         frf_r55_dma_bad |= 1U;
-        return UINT64_MAX; /* must fail before programming xHCI rings */
+        return UINT64_MAX; /* FAIL CLOSED: never program unreachable DMA */
     }
     return bus+(pa-cpu);
 }
@@ -1457,6 +1508,7 @@ static int r121_configure_composite(uint32_t cfg,uint32_t vid,uint32_t pid)
     g_hid_ready=1u;
     frf_r83_hid_count=g_native_count;
     frf_r89_native_count=g_native_count;
+    frf_r130_post_hid_discovered();
     return 1;
 }
 
@@ -1623,8 +1675,11 @@ static void frf_r92_schedule_recovery(unsigned i,uint32_t cc,int stop_first)
     h->recover_pending=1u;
     h->recover_cc=cc;
     h->recover_stop=stop_first?1u:0u;
-    if(h->protocol==0u)
-        frf_native_usb_pad_release();
+    /* Pi3 TinyUSB maintains gamepad state across a transfer retry.
+     * Do not tell the Amiga that the controller disconnected just because
+     * the xHCI transfer ring returned an error. Real disconnection must
+     * be established by the USB hub/device lifecycle, not inferred here. */
+    if(h->protocol==0u)++frf_r129_pad_recovery_kept_state;
     frf_r92_recovery_state[i]=1u;
     frf_r92_recovery_attempts[i]=tries;
     frf_r92_last_cc[i]=cc;
@@ -1681,6 +1736,7 @@ static int frf_r92_recover_endpoint(unsigned i)
     }
     h->pending=0u;
     h->pending_since_cnt=0u;
+    h->idle_noted=0u;
     h->recover_pending=0u;
     h->recover_stop=0u;
     frf_r92_recovery_state[i]=3u;
@@ -1717,14 +1773,18 @@ int frf_xhci_host_native_poll_any(void *dst,uint32_t capacity,
             if(age>255u)age=255u;
             if(age>latest_age)latest_age=(uint32_t)age;
         }
-        /* A wireless gamepad receiver may stop completing its IN TD when
-           the paired controller drops sync. Do not permanently strand
-           that slot, but also don't reset idle keyboard/mouse endpoints.
-           Allow 10 seconds without a gamepad completion before Stop EP. */
-        if(h->protocol==0u && h->pending && h->pending_since_cnt &&
-           now-h->pending_since_cnt>=hz*10u && !h->recover_pending) {
-            ++frf_r92_silent_timeout[i];
-            frf_r92_schedule_recovery(i,0xffu,1);
+        /* R129 Pi3 compatibility: an interrupt-IN TD on an idle radio
+         * receiver may be NAKed forever. NAKs do not generate a transfer
+         * completion and MUST NOT be treated as a failed USB connection.
+         * R128 forcibly stopped/reinitialized the endpoint every 10sec,
+         * making wireless controllers repeatedly flash sync/unsync.
+         * Record this event ONCE only; leave the xHC-owned TD untouched.
+         * Real STALL / USB Transaction Error events still recover below. */
+        if(frf_r129_gamepad_idle_pending(h->protocol,h->pending,
+                                        h->pending_since_cnt,now,hz) &&
+           !h->recover_pending && !h->idle_noted) {
+            h->idle_noted=1u;
+            ++frf_r129_gamepad_idle_kept;
         }
         if(h->recover_pending) {
             if((int64_t)(now-h->retry_after_cnt)>=0) {
@@ -1761,6 +1821,7 @@ int frf_xhci_host_native_poll_any(void *dst,uint32_t capacity,
         frf_r88_hid_td_size[i]=td_len;
         h->pending=trb_dma;
         h->pending_since_cnt=host_counter();
+        h->idle_noted=0u;
         ++frf_r82_arm[i];
         host_write32(g_db+(uintptr_t)h->slot*4u,h->dci);
     }
@@ -1801,6 +1862,7 @@ int frf_xhci_host_native_poll_any(void *dst,uint32_t capacity,
             matched=1u;
             h->pending=0u;
             h->pending_since_cnt=0u;
+            h->idle_noted=0u;
             uint32_t cc=(status>>24)&0xffu, residual=status&0xffffffu;
             uint32_t td_len=h->pending_length;
             frf_r82_last_cc[i]=cc;
@@ -2762,6 +2824,7 @@ static int r97_scan_hub(struct R97HubState *hub)
                 ++g_r97_next_bank;
                 frf_r83_hid_count=g_native_count;
                 frf_r89_native_count=g_native_count;
+                frf_r130_post_hid_discovered();
                 frf_r97_ext_live_mask|=1u<<port;
                 frf_r97_ext_stage=7u;
                 kprintf("[R97-HUB] live HID%u depth%u port%u slot%u protocol%u\n",
@@ -3097,19 +3160,15 @@ static int hub_scan_children(void)
                 frf_r98_root_attempts[port-1u]=attempt+1u;
                 frf_r98_root_stage[port-1u]=2u;
             }
-            /* Once only: power cycle the failing high-speed port, not
-               any other live keyboard/mouse/gamepad port. */
+            /* Pi3 radio receivers remain powered while HID is idle.
+             * R128's retry sequence toggled PORT_POWER OFF/ON on attempt3,
+             * regardless of whether the USB hub has shared/ganged power.
+             * That can disconnect OTHER ports and trigger repeated pairing.
+             * Keep each retry local to hub-port RESET (below). Never cycle
+             * downstream power after initial hub initialization. */
             if(attempt==2u && port<=4u &&
-               frf_r98_root_speed[port-1u]==3u) {
-                if(hub_port_feature(port,USB_HUB_FEAT_PORT_POWER,0)) {
-                    hub_delay_ms(200u);
-                    if(hub_port_feature(port,USB_HUB_FEAT_PORT_POWER,1)) {
-                        ++frf_r98_root_power_cycles;
-                        hub_delay_ms(700u);
-                    }
-                    root_ep0_ring=g_ep0_ring;
-                }
-            }
+               frf_r98_root_speed[port-1u]==3u)
+                ++frf_r129_port_power_off_avoided;
             frf_r98_root_hs_recovery_ms=(attempt>0u)?120u:40u;
             if(!hub_reset_downstream_port(port,&port_speed[port])) {
                 root_ep0_ring=g_ep0_ring;
@@ -3337,6 +3396,7 @@ static int hub_scan_children(void)
                 ++g_r97_next_bank; /* this DMA context is permanently live */
                 frf_r83_hid_count=g_native_count;
                 frf_r89_native_count=g_native_count;
+                frf_r130_post_hid_discovered();
                 if(port<=4u) {
                     frf_r89_native_live_mask|=1u<<port;
                     frf_r90_sequence_step[port-1u]=5u;
@@ -3524,6 +3584,8 @@ static int controller_take_ownership(void)
 
     frf_r55_first_hse=0u;
     frf_r55_dma_bad=0u;
+    frf_r126_dma_bad_pa=frf_r126_dma_bad_va=0u;
+    frf_r126_dma_bad_reason=frf_r126_dma_bad_count=0u;
     for (unsigned i=0;i<12u;i++) frf_r55_sts[i]=0xffffffffu;
     frf_usb_r54_sts_after_reset = host_read32(g_op + XHCI_OP_USBSTS);
     r55_sample_sts(0,g_op);
@@ -3684,6 +3746,10 @@ static int controller_take_ownership(void)
 static int host_scan_cpu1(void)
 {
     g_native_count=0u;
+    frf_r130_pad_discovered=frf_r130_pad_vidpid=0u;
+    frf_r129_gamepad_idle_kept=0u;
+    frf_r129_port_power_off_avoided=0u;
+    frf_r129_pad_recovery_kept_state=0u;
     frf_r92_defer_rd=frf_r92_defer_wr=0u;
     frf_r92_deferred_events=frf_r92_deferred_overflow=0u;
     frf_r83_hid_count=0u;
@@ -3698,6 +3764,7 @@ static int host_scan_cpu1(void)
         frf_r92_recovery_state[i]=frf_r92_recovery_attempts[i]=0u;
         frf_r92_last_cc[i]=frf_r92_recovery_ok[i]=0u;
         frf_r92_silent_timeout[i]=0u;
+        g_native_hid[i].idle_noted=0u;
         g_native_hid[i].valid=0u;
         g_native_hid[i].pending=0u;
         g_native_hid[i].pending_length=0u;

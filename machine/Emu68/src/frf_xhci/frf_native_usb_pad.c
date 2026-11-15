@@ -205,7 +205,9 @@ int frf_native_usb_pad_report_for(unsigned index,const uint8_t *b,unsigned len)
       uint32_t ry=((uint32_t)b[10]>>4u)|((uint32_t)b[11]<<4u);
       int dx=((b[5]&0x04u)?127:0)-((b[5]&0x08u)?127:0);
       int dy=((b[5]&0x01u)?127:0)-((b[5]&0x02u)?127:0);
-      unsigned buttons=((b[3]&(0x08u|0x01u))?1u:0u)|
+      /* Native Amiga has B1/B2/B3 only. Switch Pro physical face
+         button 4 (0x01) has NO native Amiga output; don't OR into B1. */
+      unsigned buttons=((b[3]&0x08u)?1u:0u)|
                        ((b[3]&0x04u)?2u:0u)|
                        ((b[3]&0x02u)?4u:0u);
       /* Forward sticks 0/1 and 2/3, plus digital D-pad. The same

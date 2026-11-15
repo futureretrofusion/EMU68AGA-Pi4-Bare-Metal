@@ -18,6 +18,7 @@
 #include <string.h>
 #include "aga/chipset.h"
 #include "aga_glue.h"
+#include "frf_potgor_model.h"
 #include "mmu.h"
 #include "A64.h"          /* MMU_* page attributes */
 #include "cache.h"        /* Emu68's software I/D caches: flushed/invalidated around redirection */
@@ -169,24 +170,32 @@ static volatile uint8_t frf_mouse_x, frf_mouse_y;
    15/14 RY, 13/12 RX, 11/10 LY (port-1 right mouse), 9/8 LX. */
 static volatile uint16_t frf_potgo;
 static volatile uint16_t frf_pad_potgor[2];
+static volatile uint32_t frf_pad_fullbuttons[2];
 
 void aga_virtual_pad_buttons(int port,uint32_t buttons)
 {
     if((unsigned)port>1u)return;
-    /* Matches Pi3 v0.10.56: joystick fire2 and fire3 are active-low
-       POTGOR input pins, separately from primary CIA-A fire. */
-    uint16_t mask=0u;
-    if(buttons&2u)mask|=port?0x4000u:0x0400u;
-    if(buttons&4u)mask|=port?0x1000u:0x0100u;
+    __atomic_store_n(&frf_pad_fullbuttons[port],buttons,__ATOMIC_RELEASE);
+    uint16_t mask=0;
+    /* Exact Pi3 bare-metal port 2 policy:
+       B1 -> CIA-A PRA7; B2 -> RY POTGOR bit14; B3 -> RX bit12.
+       Fourth is not a native Amiga port-2 button.
+       Do not drive port 1's POTGOR pins from a port-2 controller. */
+    if(port==1 && (buttons&2u))mask|=0x4000u;
+    if(port==1 && (buttons&4u))mask|=0x1000u;
     __atomic_store_n(&frf_pad_potgor[port],mask,__ATOMIC_RELEASE);
 }
 
-uint8_t aga_virtual_ciaa_buttons(void)
+static uint8_t frf_virtual_ciaa_buttons_value(void)
 {
     uint8_t v = 0xC0u;
     if (frf_fire_bits & 1u) v &= (uint8_t)~0x40u;
     if (frf_fire_bits & 2u) v &= (uint8_t)~0x80u;
     return v;
+}
+uint8_t aga_virtual_ciaa_buttons(void)
+{
+    return frf_virtual_ciaa_buttons_value();
 }
 void aga_virtual_joy_set(int port, uint16_t joydat, int fire)
 {
@@ -209,15 +218,39 @@ void aga_virtual_mouse_update(int dx, int dy, unsigned buttons)
 }
 #endif
 
+#ifdef FRF_VIRTUAL_AGA
+/* Ported from Pi3 Bare Metal: one authoritative POTGOR computation,
+ * shared by guest custom-register reads and native USB diagnostics. */
+static uint16_t frf_virtual_potgor_value(void)
+{
+    uint16_t pg=__atomic_load_n(&frf_potgo,__ATOMIC_ACQUIRE);
+    uint8_t mb=__atomic_load_n(&frf_mouse_buttons,__ATOMIC_ACQUIRE);
+    extern int frf_usb_early_startup_active(void);
+    if(frf_usb_early_startup_active())mb|=3u;
+    uint16_t pad=__atomic_load_n(&frf_pad_potgor[0],__ATOMIC_ACQUIRE) |
+                 __atomic_load_n(&frf_pad_potgor[1],__ATOMIC_ACQUIRE);
+    return frf_potgor_model(pg,mb,pad);
+}
+void aga_virtual_pad_line_snapshot(uint8_t *pra,uint16_t *potgor)
+{
+    if(pra)*pra=frf_virtual_ciaa_buttons_value();
+    if(potgor)*potgor=frf_virtual_potgor_value();
+}
+#endif
 #if defined(FRF_PI4_MOUSE_DIAG) && defined(FRF_VIRTUAL_AGA)
-static uint16_t hook_ext_read(void *u, uint32_t reg);
 uint32_t frf_pi4_guest_mouse_button_snapshot(void)
 {
-    /* Sample the EXACT emulated POTGOR provider, including POTGO output
-     * ownership and pad pins, so USB and guest states are comparable.
-     * No MMIO, guest-memory access, or writes. */
     uint32_t buttons=__atomic_load_n(&frf_mouse_buttons,__ATOMIC_ACQUIRE);
-    return (buttons<<16) | hook_ext_read(NULL,POTGOR);
+    return (buttons<<16) | frf_virtual_potgor_value();
+}
+uint32_t frf_pi4_guest_pad_lines_snapshot(void)
+{
+    /* Raw full Pi3 HID logical bits, raw 2nd/3rd mask and POTGO output
+       ownership, all READ-ONLY. Caller can compare to guest POTGOR. */
+    uint32_t pg=__atomic_load_n(&frf_potgo,__ATOMIC_ACQUIRE);
+    uint32_t mask=__atomic_load_n(&frf_pad_potgor[1],__ATOMIC_ACQUIRE);
+    uint32_t buttons=__atomic_load_n(&frf_pad_fullbuttons[1],__ATOMIC_ACQUIRE);
+    return (pg<<16)|((mask&0x5000u)>>8)|(buttons&0xffu);
 }
 #endif
 static uint16_t hook_ext_read(void *u, uint32_t reg)
@@ -229,26 +262,7 @@ static uint16_t hook_ext_read(void *u, uint32_t reg)
        may escape to ps_read_* or to a donor Amiga chipset. */
     if (reg == JOY0DAT) return __atomic_load_n(&frf_joydat[0], __ATOMIC_ACQUIRE);
     if (reg == JOY1DAT) return __atomic_load_n(&frf_joydat[1], __ATOMIC_ACQUIRE);
-    if (reg == POTGOR) {
-        uint16_t pg = __atomic_load_n(&frf_potgo, __ATOMIC_ACQUIRE);
-        uint16_t v = (uint16_t)((pg & 0xAA00u) | 0x5500u);
-        uint8_t mb = __atomic_load_n(&frf_mouse_buttons, __ATOMIC_ACQUIRE);
-        if ((pg & 0x0800u) && !(pg & 0x0400u)) v &= (uint16_t)~0x0400u;
-        if ((pg & 0x0200u) && !(pg & 0x0100u)) v &= (uint16_t)~0x0100u;
-        extern int frf_usb_early_startup_active(void);
-        if (frf_usb_early_startup_active()) mb |= 3u;
-        if (mb & 2u) v &= (uint16_t)~0x0400u;
-        if (mb & 4u) v &= (uint16_t)~0x0100u;
-        /* Restore Pi3 USB joypad buttons 2 and 3 on joystick port2.
-           Respect Paula POTGO OUT/DAT ownership of each input pin. */
-        uint16_t pads=__atomic_load_n(&frf_pad_potgor[1],__ATOMIC_ACQUIRE)|
-                      __atomic_load_n(&frf_pad_potgor[0],__ATOMIC_ACQUIRE);
-        if(!(pg&0x8000u))v&=(uint16_t)~(pads&0x4000u);
-        if(!(pg&0x2000u))v&=(uint16_t)~(pads&0x1000u);
-        if(!(pg&0x0800u))v&=(uint16_t)~(pads&0x0400u);
-        if(!(pg&0x0200u))v&=(uint16_t)~(pads&0x0100u);
-        return v;
-    }
+    if (reg == POTGOR) return frf_virtual_potgor_value();
     /* No receive-side serial device is attached. Real Paula reports the
        transmitter empty/shift-register empty bits; returning $FFFF here was
        a hybrid stub leak and is not a valid virtual-Paula state. */
@@ -864,7 +878,7 @@ int aga_glue_init(uint8_t *chipram_va, uint32_t size, uint8_t *fb_va, uintptr_t 
     /* R83 diagnostic kernel ONLY: persistent read-only numeric transport
      * status. No guest reads and no USB register writes from the video CPU.
      * Screenshot the 12 hex rows to identify the failing ARM native stage. */
-    frf_hud = 1;
+    frf_hud = 0; /* Pi4 R130 clean display: keep USB diagnostics internal */
 #endif
     aga_video_overlay_allow(frf_hud);
     aga_video_overlay_enable(frf_hud);

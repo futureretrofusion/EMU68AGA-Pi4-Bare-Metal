@@ -4,6 +4,11 @@ extern void frf_vcia_keyboard_raw(uint8_t raw);
 extern void aga_virtual_mouse_update(int dx, int dy, unsigned buttons);
 extern void aga_virtual_joy_set(int port, uint16_t joydat, int fire);
 extern void aga_virtual_pad_buttons(int port,uint32_t buttons);
+/* Trace actual decoded USB HID button bits across ARM->Amiga boundary.
+ * These values are diagnostics only, no extra input mapping. */
+volatile uint32_t frf_r127_legacy_decoded_buttons;
+volatile uint32_t frf_r127_legacy_native_buttons;
+volatile uint32_t frf_r127_legacy_input_updates;
 
 volatile uint32_t frf_native_usb_key_reports;
 volatile uint32_t frf_native_usb_key_events;
@@ -111,6 +116,8 @@ void frf_native_usb_pad_release(void)
        report counters or modifying unrelated keyboard/mouse input. */
     aga_virtual_joy_set(1,0u,0);
     aga_virtual_pad_buttons(1,0u);
+    __atomic_store_n(&frf_r127_legacy_native_buttons,0u,__ATOMIC_RELEASE);
+    __atomic_store_n(&frf_r127_legacy_decoded_buttons,0u,__ATOMIC_RELEASE);
 }
 void frf_native_usb_pad_update_axes(int x,int y,int x2,int y2,
                                     unsigned buttons,int hat)
@@ -131,10 +138,18 @@ void frf_native_usb_pad_update_axes(int x,int y,int x2,int y2,
     if(rr)joy|=0x0002u;
     if(!!l != !!u) joy|=0x0100u;
     if(!!rr != !!d)joy|=0x0001u;
-    aga_virtual_joy_set(1,joy,(buttons&1u)!=0u);
-    /* Pi3 port-2: button2=POTGOR14, button3=POTGOR12.
-       Unlike the old four-buttons->fire collapse, these remain distinct. */
-    aga_virtual_pad_buttons(1,buttons);
+    /* Native Amiga joystick port 2 exposes exactly THREE buttons:
+       B1 CIA-A PRA7 active low, B2 POTGOR bit14 active low,
+       B3 POTGOR bit12 active low. Fourth and higher HID button bits
+       are not silently collapsed to the first button.
+       Preserve *unmodified* HID bits in diagnostics so we can tell
+       decoder mismatch from actual POTGOR register behavior. */
+    const unsigned amiga_buttons=buttons&7u;
+    __atomic_store_n(&frf_r127_legacy_decoded_buttons,buttons,__ATOMIC_RELEASE);
+    __atomic_store_n(&frf_r127_legacy_native_buttons,amiga_buttons,__ATOMIC_RELEASE);
+    __atomic_add_fetch(&frf_r127_legacy_input_updates,1u,__ATOMIC_RELAXED);
+    aga_virtual_joy_set(1,joy,(amiga_buttons&1u)!=0u);
+    aga_virtual_pad_buttons(1,amiga_buttons);
     __atomic_add_fetch(&frf_native_usb_pad_reports,1u,__ATOMIC_RELAXED);
 }
 void frf_native_usb_pad_update(int x,int y,unsigned buttons,int hat)

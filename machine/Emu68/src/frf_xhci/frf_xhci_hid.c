@@ -59,6 +59,10 @@ volatile uint32_t frf_r91_pad_desc_expected,frf_r91_pad_desc_received;
 volatile uint32_t frf_r91_pad_candidate,frf_r91_pad_ready;
 volatile uint32_t frf_r91_pad_status,frf_r91_last_pad_report;
 volatile uint32_t frf_r91_last_pad_report_bytes,frf_r91_pad_accepted;
+/* R127 legacy: first four raw HID bytes (little-endian) and the number
+ * of protocol-zero packets, including packets rejected by the parser. */
+volatile uint32_t frf_r127_legacy_report_word;
+volatile uint32_t frf_r127_legacy_report_rx;
 volatile uint32_t frf_r92_pad_hid_index=0xffffffffu;
 /* R96 official Nintendo Switch Pro 057e:2009 USB command telemetry. */
 volatile uint32_t frf_r96_switch_init_stage,frf_r96_switch_init_ack;
@@ -151,16 +155,14 @@ void frf_pi4_xhci_hid_main(void)
     while (!__atomic_load_n(&frf_usb_host_start_allowed, __ATOMIC_ACQUIRE))
         __asm__ volatile("wfe");
     extern void frf_boot_stage(unsigned stage);
-    /* Keep R75 startup critical path clear. CPU1 runs asynchronously and
-     * waits for CPU0 to enter the guest before touching PCIe controller. */
+    /* R130: CPU0's frf_usb_host_start_allowed is the ACTUAL
+     * firmware/MMU/ROM handoff. By the time it publishes that flag,
+     * early mailbox work is finished. R129 then waited an unrelated
+     * fixed two seconds, keeping radio receivers unpolled during boot.
+     * Start xHCI enumeration immediately after the real handoff.
+     * The R125 bounded VL805 firmware/CNR and USB2 hub power-settle
+     * requirements remain in the host/probe code and are NOT skipped. */
     frf_timebase_calibrate();
-    uint64_t boot_begin=0,boot_now=0,boot_hz=frf_timebase_hz();
-    if (!boot_hz || boot_hz>2000000000ULL) boot_hz=54000000ULL;
-    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(boot_begin));
-    do {
-        __asm__ volatile("yield");
-        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(boot_now));
-    } while (boot_now-boot_begin<boot_hz*2ULL);
     frf_boot_stage(9);
     kprintf("[PI4-XHCI] CPU1 standalone HID start\n");
     /* R79: one bounded xHCI takeover per power cycle. The R76/R77 path
@@ -347,6 +349,11 @@ void frf_pi4_xhci_hid_main(void)
                 frf_native_usb_keyboard_report(report);
                 frf_sdlog_xhci_stage=71u;
             } else if(proto==0u && pad_ready[device] && got>0u) {
+                uint32_t word=0u;
+                for(uint32_t j=0u;j<got && j<4u;j++)
+                    word|=(uint32_t)report[j]<<(8u*j);
+                __atomic_store_n(&frf_r127_legacy_report_word,word,__ATOMIC_RELEASE);
+                __atomic_add_fetch(&frf_r127_legacy_report_rx,1u,__ATOMIC_RELAXED);
                 if(report[0]==0x30u || report[0]==0x21u ||
                    report[0]==0x3fu)
                     ++frf_r96_switch_input_rx;

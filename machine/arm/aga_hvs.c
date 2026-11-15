@@ -1757,7 +1757,7 @@ static void r94_post_panel(uint32_t *dst)
     ovl_fill(dst,x,y,w,2,cyan);
     ovl_fill(dst,x,y+h-2,w,2,cyan);
 #if defined(FRF_PI4_SAFE_VL805_NOTIFY)
-    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R125 FW SAFE USB",cyan);
+    r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R130 HANDSHAKE",cyan);
 #else
     r94_post_text(dst,x+8,y+ym+16*0,"FRF PI4 R115 LIVE USB POST",cyan);
 #endif
@@ -1789,6 +1789,73 @@ static void r94_post_panel(uint32_t *dst)
     r94_post_hex(dst,x+200,y+ym+16*5,frf_r115_scan_child_count,2,cyan);
     r94_post_text(dst,x+239,y+ym+16*5,"HE:",white);
     r94_post_hex(dst,x+283,y+ym+16*5,frf_r97_ext_error,2,amber);
+    /* R127 legacy hardware diagnostic: seen 2.4GHz radio receivers can
+     * enumerate yet deliver no reports, or only report one HID button.
+     * Compare raw USB bytes -> decoded bits -> native B1/B2/B3 ->
+     * the guest-visible CIA/POTGOR registers. Do not modify any output. */
+    if(frf_r91_pad_candidate) {
+        extern volatile uint32_t frf_r91_last_pad_vidpid;
+        extern volatile uint32_t frf_r91_pad_ready,frf_r91_pad_status;
+        extern volatile uint32_t frf_r91_last_pad_report_bytes;
+        extern volatile uint32_t frf_r91_pad_accepted;
+        extern volatile uint32_t frf_r127_legacy_report_word;
+        extern volatile uint32_t frf_r127_legacy_report_rx;
+        extern volatile uint32_t frf_r127_legacy_decoded_buttons;
+        extern volatile uint32_t frf_r127_legacy_native_buttons;
+        extern volatile uint32_t frf_r99_hid_error_count;
+        extern volatile uint32_t frf_r99_hid_recovered_total;
+        extern uint8_t aga_virtual_ciaa_buttons(void);
+        const uint32_t hid=frf_r127_legacy_decoded_buttons;
+        const uint32_t mapped=frf_r127_legacy_native_buttons;
+        const uint32_t pot=frf_pi4_guest_mouse_button_snapshot()&0xffffu;
+        const uint32_t cia=aga_virtual_ciaa_buttons();
+        extern uint32_t frf_pi4_guest_pad_lines_snapshot(void);
+        const uint32_t lines=frf_pi4_guest_pad_lines_snapshot();
+        const uint32_t pg=(lines>>16)&0xffffu;
+        const uint32_t pmask=lines&0x50u;
+        const uint32_t b1=(cia&0x80u)?0u:1u;
+        const uint32_t b2=(pot&0x4000u)?0u:1u;
+        const uint32_t b3=(pot&0x1000u)?0u:1u;
+        extern volatile uint32_t frf_r129_gamepad_idle_kept;
+        r94_post_text(dst,x+8,y+ym+16*6,"GAMEPAD 3 BTN",cyan);
+        r94_post_text(dst,x+168,y+ym+16*6,"IDLE:",white);
+        r94_post_hex(dst,x+235,y+ym+16*6,frf_r129_gamepad_idle_kept,4,green);
+        r94_post_text(dst,x+8,y+ym+16*7,"VIDPID:",white);
+        r94_post_hex(dst,x+97,y+ym+16*7,frf_r91_last_pad_vidpid,8,cyan);
+        r94_post_text(dst,x+8,y+ym+16*8,"PAD READY:",white);
+        r94_post_hex(dst,x+121,y+ym+16*8,frf_r91_pad_ready,2,green);
+        r94_post_text(dst,x+174,y+ym+16*8,"STATUS:",white);
+        r94_post_hex(dst,x+252,y+ym+16*8,frf_r91_pad_status,2,amber);
+        r94_post_text(dst,x+8,y+ym+16*9,"USB RX:",white);
+        r94_post_hex(dst,x+90,y+ym+16*9,frf_r127_legacy_report_rx,4,cyan);
+        r94_post_text(dst,x+167,y+ym+16*9,"ACCEPT:",white);
+        r94_post_hex(dst,x+247,y+ym+16*9,frf_r91_pad_accepted,4,cyan);
+        r94_post_text(dst,x+8,y+ym+16*10,"RAW REPORT:",white);
+        r94_post_hex(dst,x+133,y+ym+16*10,frf_r127_legacy_report_word,8,cyan);
+        r94_post_text(dst,x+8,y+ym+16*11,"DECODED:",white);
+        r94_post_hex(dst,x+108,y+ym+16*11,hid,8,cyan);
+        r94_post_text(dst,x+8,y+ym+16*12,"NATIVE 1-3:",white);
+        r94_post_hex(dst,x+140,y+ym+16*12,mapped,2,green);
+        r94_post_text(dst,x+204,y+ym+16*12,"LEN:",white);
+        r94_post_hex(dst,x+257,y+ym+16*12,frf_r91_last_pad_report_bytes,2,cyan);
+        r94_post_text(dst,x+8,y+ym+16*13,"B1 CIA:",white);
+        r94_post_hex(dst,x+95,y+ym+16*13,b1,2,b1?green:amber);
+        r94_post_text(dst,x+149,y+ym+16*13,"B2 POT14:",white);
+        r94_post_hex(dst,x+274,y+ym+16*13,b2,2,b2?green:amber);
+        r94_post_text(dst,x+8,y+ym+16*14,"B3 POT12:",white);
+        r94_post_hex(dst,x+125,y+ym+16*14,b3,2,b3?green:amber);
+        r94_post_text(dst,x+183,y+ym+16*14,"POTGOR:",white);
+        r94_post_hex(dst,x+266,y+ym+16*14,pot,4,cyan);
+        r94_post_text(dst,x+8,y+ym+16*15,"HID ERR:",white);
+        r94_post_hex(dst,x+110,y+ym+16*15,frf_r99_hid_error_count,4,amber);
+        r94_post_text(dst,x+181,y+ym+16*15,"REC:",white);
+        r94_post_hex(dst,x+235,y+ym+16*15,frf_r99_hid_recovered_total,4,cyan);
+        r94_post_text(dst,x+8,y+ym+16*16,"POTGO:",white);
+        r94_post_hex(dst,x+82,y+ym+16*16,pg,4,cyan);
+        r94_post_text(dst,x+159,y+ym+16*16,"PAD MASK:",white);
+        r94_post_hex(dst,x+264,y+ym+16*16,pmask,2,green);
+        return;
+    }
     r94_post_text(dst,x+8,y+ym+16*6,"MSC SEEN",white);
     r94_post_hex(dst,x+88,y+ym+16*6,seen,2,seen?green:amber);
     r94_post_text(dst,x+128,y+ym+16*6,"CFG",white);

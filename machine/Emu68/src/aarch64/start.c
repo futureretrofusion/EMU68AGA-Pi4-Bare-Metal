@@ -2257,6 +2257,29 @@ void boot(void *dtree)
         kprintf("[R76] Pi4 USB worker released on CPU1; Amiga boot is non-blocking\n");
     }
 #endif
+    /* R131: display-only boot POST hold; CPU1 enumeration is unchanged. */
+#if defined(FRF_BOOT_POST) && defined(FRF_PI4_XHCI_HID) && defined(FRF_VIRTUAL_AGA)
+    {
+        extern volatile uint8_t frf_usb_boot_ready;
+        extern void frf_boot_post_devices(void);
+        uint64_t hz, begin, now, hold;
+        __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(hz));
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(begin));
+        if (hz && hz < 2000000000ull) {
+            do {
+                __asm__ volatile("yield");
+                __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+            } while (!__atomic_load_n(&frf_usb_boot_ready, __ATOMIC_ACQUIRE)
+                     && (now - begin) < hz * 14u);
+            frf_boot_post_devices();
+            __asm__ volatile("mrs %0, cntvct_el0" : "=r"(hold));
+            do {
+                __asm__ volatile("yield");
+                __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+            } while ((now - hold) < hz * 2u);
+        }
+    }
+#endif
     M68K_StartEmu(0, NULL);
 
     while(1) __asm__ volatile("wfe");

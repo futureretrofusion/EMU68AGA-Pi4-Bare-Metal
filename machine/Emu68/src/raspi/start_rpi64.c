@@ -271,6 +271,12 @@ extern volatile uint32_t frf_usb_port_status_first8[8];
 extern volatile uint32_t frf_usb_host_phase;
 extern volatile uint32_t frf_sdlog_xhci_stage;
 extern volatile uint32_t frf_sdlog_xhci_error;
+extern volatile uint32_t frf_r94_last_seen_vidpid;
+extern volatile uint32_t frf_r91_last_pad_vidpid;
+extern volatile uint32_t frf_r91_pad_candidate,frf_r91_pad_ready;
+extern volatile uint32_t frf_r130_pad_discovered,frf_r130_pad_vidpid;
+extern volatile uint32_t frf_r91_pad_accepted;
+extern volatile uint32_t frf_r127_legacy_report_rx;
 static volatile unsigned frf_post_stage = 0u;
 static volatile unsigned frf_post_active = 0u;
 static volatile unsigned char frf_post_lock = 0u;
@@ -319,10 +325,13 @@ static void frf_post_hex32(int x,int y,uint32_t v,uint16_t rgb)
 }
 static void frf_post_draw(void)
 {
-    /* R107: diagnostics-only expansion; no VL805 register writes. */
+    /* R130: preserve R126 fail-closed DMA audit, but add progress and
+     * receiver identities to the actual firmware boot POST. The AGA
+     * renderer remains unchanged; this draws only to the boot framebuffer.
+     * A received HID endpoint is CANDIDATE until descriptor accepted. */
     if(!frf_post_active||!framebuffer||!pitch||fb_width<360u||
-       fb_height<380u)return;
-    const int w=320,h=360,x=(int)fb_width-w-18,y=18;
+       fb_height<660u)return;
+    const int w=320,h=620,x=(int)fb_width-w-18,y=18;
     const uint16_t white=0xffffu,cyan=0x07ffu,green=0x07e0u,
                    yellow=0xffc0u,grey=0x8410u;
     frf_post_box(x,y,w,h,0x0000u);
@@ -344,11 +353,13 @@ static void frf_post_draw(void)
     const uint32_t stage=__atomic_load_n(&frf_post_stage,__ATOMIC_ACQUIRE);
     const uint32_t host_error=__atomic_load_n(&frf_sdlog_xhci_error,__ATOMIC_ACQUIRE);
     const uint32_t host_stage=__atomic_load_n(&frf_sdlog_xhci_stage,__ATOMIC_ACQUIRE);
-    const int live=(k+m+g)!=0u && hid!=0u;
+    const int discovered=(k+m+g)!=0u && hid!=0u;
+    const int live=ready && discovered;
     const int failed=(host_stage&0x80000000u)!=0u && host_error!=0u;
     frf_post_text(x+12,y+101,"USB HOST:",white);
     frf_post_text(x+156,y+101,live?"HID READY":failed?"HOST ERROR":
-                  ready?"NO HID":"STARTING",live?green:yellow);
+                  discovered?"ENUM HID":ready?"NO HID":"SCANNING",
+                  live?green:yellow);
     frf_post_text(x+12,y+121,"KEYBOARD:",white);
     frf_post_count(x+110,y+121,k,k?green:yellow);
     frf_post_text(x+168,y+121,"MOUSE:",white);
@@ -367,7 +378,8 @@ static void frf_post_draw(void)
     frf_post_count(x+270,y+181,host_error,host_error?yellow:green);
     frf_post_text(x+12,y+201,"STATUS:",white);
     frf_post_text(x+110,y+201,live?"USB INPUT OK":failed?"USB HOST FAILED":
-                  ready?"ZERO HID":"BOOTING",live?green:yellow);
+                  discovered?"HID DISCOVERED":ready?"ZERO HID":"USB SCAN",
+                  live?green:yellow);
     frf_post_text(x+12,y+221,"HOST PHASE:",white);
     frf_post_count(x+126,y+221,frf_usb_host_phase,cyan);
     frf_post_text(x+168,y+221,"PORTS:",white);
@@ -394,6 +406,57 @@ static void frf_post_draw(void)
     frf_post_count(x+138,y+323,frf_pi4_um_attempts(),cyan);
     frf_post_text(x+172,y+323,"BOT STAGE:",white);
     frf_post_count(x+271,y+323,frf_pi4_um_last_bot_error(),yellow);
+#endif
+    frf_post_box(x+12,y+340,w-24,1,grey);
+    frf_post_text(x+12,y+345,"LAST USB VIDPID",white);
+    frf_post_hex32(x+173,y+345,frf_r94_last_seen_vidpid,cyan);
+    frf_post_text(x+12,y+365,"PAD VIDPID",white);
+    frf_post_hex32(x+173,y+365,frf_r91_last_pad_vidpid?
+                   frf_r91_last_pad_vidpid:frf_r130_pad_vidpid,cyan);
+    frf_post_text(x+12,y+385,"PAD SEEN",white);
+    frf_post_count(x+104,y+385,frf_r130_pad_discovered,cyan);
+    frf_post_text(x+164,y+385,"PAD READY",white);
+    frf_post_count(x+262,y+385,frf_r91_pad_ready,
+                   frf_r91_pad_ready?green:yellow);
+    frf_post_text(x+12,y+405,"PAD RX",white);
+    frf_post_hex32(x+85,y+405,frf_r127_legacy_report_rx,cyan);
+    frf_post_text(x+173,y+405,"ACCEPT",white);
+    frf_post_hex32(x+229,y+405,frf_r91_pad_accepted,cyan);
+#if defined(FRF_PI4_SAFE_VL805_NOTIFY)
+    {
+        extern volatile uint64_t frf_r55_dma_cpu_base,frf_r55_dma_bus_base;
+        extern volatile uint64_t frf_r55_dma_window_size;
+        extern volatile uint64_t frf_r126_dma_bad_pa;
+        extern volatile uint64_t frf_r55_phys_cmd;
+        extern volatile uint32_t frf_r126_dma_bad_reason,frf_r126_dma_bad_count;
+        extern volatile uint32_t frf_r125_fw_phase,frf_r55_dma_bad;
+        const uint16_t alert=(host_error==8u)?yellow:cyan;
+        frf_post_text(x+12,y+426,"LEGACY VL805 DMA DIAGNOSTIC",alert);
+        frf_post_box(x+12,y+444,w-24,1,grey);
+        frf_post_text(x+12,y+455,"CPU BASE",white);
+        frf_post_hex32(x+118,y+455,(uint32_t)(frf_r55_dma_cpu_base>>32),alert);
+        frf_post_hex32(x+182,y+455,(uint32_t)frf_r55_dma_cpu_base,alert);
+        frf_post_text(x+12,y+477,"BUS BASE",white);
+        frf_post_hex32(x+118,y+477,(uint32_t)(frf_r55_dma_bus_base>>32),alert);
+        frf_post_hex32(x+182,y+477,(uint32_t)frf_r55_dma_bus_base,alert);
+        frf_post_text(x+12,y+499,"DMA SIZE",white);
+        frf_post_hex32(x+118,y+499,(uint32_t)(frf_r55_dma_window_size>>32),alert);
+        frf_post_hex32(x+182,y+499,(uint32_t)frf_r55_dma_window_size,alert);
+        frf_post_text(x+12,y+521,"BAD PHYS",white);
+        frf_post_hex32(x+118,y+521,(uint32_t)(frf_r126_dma_bad_pa>>32),alert);
+        frf_post_hex32(x+182,y+521,(uint32_t)frf_r126_dma_bad_pa,alert);
+        frf_post_text(x+12,y+543,"CMD PHYS",white);
+        frf_post_hex32(x+118,y+543,(uint32_t)(frf_r55_phys_cmd>>32),cyan);
+        frf_post_hex32(x+182,y+543,(uint32_t)frf_r55_phys_cmd,cyan);
+        frf_post_text(x+12,y+565,"DMA REASON",white);
+        frf_post_count(x+125,y+565,frf_r126_dma_bad_reason,alert);
+        frf_post_text(x+166,y+565,"COUNT",white);
+        frf_post_count(x+231,y+565,frf_r126_dma_bad_count,alert);
+        frf_post_text(x+12,y+587,"FW PH",white);
+        frf_post_count(x+73,y+587,frf_r125_fw_phase,cyan);
+        frf_post_text(x+117,y+587,"DMA BAD",white);
+        frf_post_count(x+204,y+587,frf_r55_dma_bad,alert);
+    }
 #endif
     __asm__ volatile("dsb ishst" ::: "memory");
 }
