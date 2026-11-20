@@ -292,6 +292,19 @@ static uint32_t g_ep0_mps;
 /* R111: retain dedicated MSC slot after enumeration restores root EP0.
  * No xHCI controller reset or resource reuse while HID is active. */
 static uint32_t g_frf_msc_slot;
+#if defined(FRF_PI4_USB_MASS_MULTI)
+/* R133: separate BOT slot, endpoint rings, and LUN metadata. HID endpoints
+ * retain their own independent rings.  Multiple LUNs on one USB card reader
+ * share the SAME physical BOT endpoints but get separate guest disk units. */
+#define FRF_R133_MSC_SLOTS 4u
+struct R133MSC {
+    uint32_t slot,iface,max_lun,vidpid,in_dci,out_dci;
+    struct XHCIRing in_ring,out_ring;
+};
+static struct R133MSC g_r133_msc[FRF_R133_MSC_SLOTS];
+static uint32_t g_r133_msc_count;
+static uint32_t g_r133_msc_iface_last;
+#endif
 /* R112 MSC path: independent observed/registered counters. */
 volatile uint32_t frf_r112_msc_seen,frf_r112_msc_registered;
 volatile uint32_t frf_r112_msc_uasp,frf_r112_msc_config_errors;
@@ -545,6 +558,14 @@ static struct XHCITrb g_event_trbs[XHCI_EVENT_TRBS * 2U] __attribute__((aligned(
 static struct XHCITrb g_ep0_trbs[XHCI_RING_TRBS * 2U] __attribute__((aligned(8192)));
 static struct XHCITrb g_bulk_in_trbs[XHCI_RING_TRBS * 2U] __attribute__((aligned(8192)));
 static struct XHCITrb g_bulk_out_trbs[XHCI_RING_TRBS * 2U] __attribute__((aligned(8192)));
+#if defined(FRF_PI4_USB_MASS_MULTI)
+/* Each slot needs a nonaliasing 256-TRB ring with its own VL805 padding.
+ * The original pair remains bank zero for backwards-compatible USB0. */
+static struct XHCITrb g_r133_bulk_in_trbs[FRF_R133_MSC_SLOTS-1u][XHCI_RING_TRBS*2u]
+    __attribute__((aligned(8192)));
+static struct XHCITrb g_r133_bulk_out_trbs[FRF_R133_MSC_SLOTS-1u][XHCI_RING_TRBS*2u]
+    __attribute__((aligned(8192)));
+#endif
 /* R99: ring_init clears 2*TRBS (the second half is VL805 DMA padding).
  * A recovery MUST alternate between disjoint 2*TRBS regions, not an
  * overlapping +TRBS offset, or ring_init would overrun its allocation. */
@@ -1324,8 +1345,20 @@ static int configure_bulk_endpoints(uint32_t in_ep, uint32_t out_ep,
         g_bulk_out_dci < 2U || g_bulk_out_dci > 31U)
         return 0;
 
+#if defined(FRF_PI4_USB_MASS_MULTI)
+    if(g_r133_msc_count>=FRF_R133_MSC_SLOTS)return 0;
+    /* Never reset a previously configured MSC ring while registering the
+     * next USB device; xHC still owns the other slot's endpoint context. */
+    struct XHCITrb *in_trbs=g_r133_msc_count==0u?g_bulk_in_trbs:
+        g_r133_bulk_in_trbs[g_r133_msc_count-1u];
+    struct XHCITrb *out_trbs=g_r133_msc_count==0u?g_bulk_out_trbs:
+        g_r133_bulk_out_trbs[g_r133_msc_count-1u];
+    ring_init(&g_bulk_in_ring,in_trbs,XHCI_RING_TRBS);
+    ring_init(&g_bulk_out_ring,out_trbs,XHCI_RING_TRBS);
+#else
     ring_init(&g_bulk_in_ring, g_bulk_in_trbs, XHCI_RING_TRBS);
     ring_init(&g_bulk_out_ring, g_bulk_out_trbs, XHCI_RING_TRBS);
+#endif
     host_zero(g_input_context, sizeof(g_input_context));
 
     const uint32_t highest = g_bulk_in_dci > g_bulk_out_dci ? g_bulk_in_dci : g_bulk_out_dci;
@@ -1343,6 +1376,36 @@ static int configure_bulk_endpoints(uint32_t in_ep, uint32_t out_ep,
     }
     return 1;
 }
+
+#if defined(FRF_PI4_USB_MASS_MULTI)
+static int frf_r133_register_msc(uint32_t iface,uint32_t vid,uint32_t pid)
+{
+    if(g_r133_msc_count>=FRF_R133_MSC_SLOTS || !g_slot_id ||
+       !g_bulk_in_dci || !g_bulk_out_dci)return 0;
+    /* GET_MAX_LUN (BOT 0xFE, class/interface IN).  Single-LUN drives
+     * may STALL this optional request; USB BOT then defines LUN0 only.
+     * Descriptor buffer is 64-byte aligned, never a stack DMA local. */
+    uint32_t got=0u;
+    g_ctrl_buffer[0]=0u;
+    uint32_t max_lun=0u;
+    if(frf_xhci_host_control(0xa1u,0xfeu,0u,(uint16_t)iface,
+                            g_ctrl_buffer,1u,1,&got) && got==1u)
+        max_lun=g_ctrl_buffer[0];
+    if(max_lun>7u)max_lun=7u; /* avoid unbounded empty-reader probing */
+    struct R133MSC *m=&g_r133_msc[g_r133_msc_count];
+    m->slot=g_slot_id;
+    m->iface=iface;
+    m->max_lun=max_lun;
+    m->vidpid=((vid&65535u)<<16)|(pid&65535u);
+    m->in_dci=g_bulk_in_dci; m->out_dci=g_bulk_out_dci;
+    m->in_ring=g_bulk_in_ring; m->out_ring=g_bulk_out_ring;
+    ++g_r133_msc_count;
+    if(!g_frf_msc_slot)g_frf_msc_slot=m->slot;
+    kprintf("[R133-MSC] registered slot=%u iface=%u LUNs=0..%u disks=%u VID:PID=%04x:%04x\n",
+            m->slot,iface,max_lun,g_r133_msc_count,vid,pid);
+    return 1;
+}
+#endif
 
 /* FRF_R20_DIRECT_BOOT_MOUSE */
 static int host_scan_cpu1(void);
@@ -2447,6 +2510,9 @@ static int hub_parse_child(struct FRFXHCIHubDeviceInfo *d,
 
     uint32_t cur_class=0U, cur_sub=0U, cur_proto=0U;
     uint32_t cur_iface=0xffffffffu, mouse_iface=0xffffffffu;
+#if defined(FRF_PI4_USB_MASS_MULTI)
+    g_r133_msc_iface_last=0u;
+#endif
     int32_t r121_cur_index=-1;
     g_r121_hid_if_count=0u;
     g_r96_hid_out_ep=g_r96_hid_out_mps=g_r96_hid_out_interval=0u;
@@ -2514,8 +2580,12 @@ static int hub_parse_child(struct FRFXHCIHubDeviceInfo *d,
             if (!d->interface_class) {
                 d->interface_class=cur_class; d->interface_subclass=cur_sub; d->interface_protocol=cur_proto;
             }
-            if (cur_class==USB_CLASS_MASS_STORAGE && cur_sub==USB_MSC_SUBCLASS_SCSI && cur_proto==USB_MSC_PROTOCOL_BOT)
+            if (cur_class==USB_CLASS_MASS_STORAGE && cur_sub==USB_MSC_SUBCLASS_SCSI && cur_proto==USB_MSC_PROTOCOL_BOT) {
                 d->mass_storage=1U;
+#if defined(FRF_PI4_USB_MASS_MULTI)
+                g_r133_msc_iface_last=cur_iface;
+#endif
+            }
             if (cur_class==USB_CLASS_HUB) d->is_hub=1U;
         } else if (type==0x21u && len>=9u &&
                    cur_iface==mouse_iface && cur_class==USB_CLASS_HID) {
@@ -2765,12 +2835,25 @@ static int r97_scan_hub(struct R97HubState *hub)
             kprintf("[R112-MSC] UAS-only class08/06/62 VID:PID=%04x:%04x; BOT fallback required\n",
                     d->vid,d->pid);
         }
-        if(!g_frf_msc_slot && d->mass_storage && ie && oe && im && om &&
+        if(
+#if defined(FRF_PI4_USB_MASS_MULTI)
+           g_r133_msc_count<FRF_R133_MSC_SLOTS &&
+#else
+           !g_frf_msc_slot &&
+#endif
+           d->mass_storage && ie && oe && im && om &&
            g_r97_next_bank<R97_CHILD_CONTEXT_BANKS) {
             if(configure_bulk_endpoints(ie,oe,im,om) &&
                frf_xhci_host_control(0x00u,USB_REQ_SET_CONFIGURATION,
                                   (uint16_t)cfg,0u,NULL,0u,0,NULL)) {
+#if defined(FRF_PI4_USB_MASS_MULTI)
+                if(!frf_r133_register_msc(g_r133_msc_iface_last,d->vid,d->pid)) {
+                    ++frf_r112_msc_config_errors;
+                    continue;
+                }
+#else
                 g_frf_msc_slot=g_slot_id;
+#endif
                 ++frf_r112_msc_registered;
                 ++g_r97_next_bank;
                 /* While the new disk endpoint is active, submit ONE
@@ -3318,12 +3401,25 @@ static int hub_scan_children(void)
             kprintf("[R112-MSC] UAS-only class08/06/62 VID:PID=%04x:%04x; BOT fallback required\n",
                     d->vid,d->pid);
         }
-        if(!g_frf_msc_slot && d->mass_storage && ie && oe && im && om &&
+        if(
+#if defined(FRF_PI4_USB_MASS_MULTI)
+           g_r133_msc_count<FRF_R133_MSC_SLOTS &&
+#else
+           !g_frf_msc_slot &&
+#endif
+           d->mass_storage && ie && oe && im && om &&
            g_r97_next_bank<R97_CHILD_CONTEXT_BANKS) {
             if(configure_bulk_endpoints(ie,oe,im,om) &&
                frf_xhci_host_control(0x00u,USB_REQ_SET_CONFIGURATION,
                                (uint16_t)cfg,0u,NULL,0u,0,NULL)) {
+#if defined(FRF_PI4_USB_MASS_MULTI)
+                if(!frf_r133_register_msc(g_r133_msc_iface_last,d->vid,d->pid)) {
+                    ++frf_r112_msc_config_errors;
+                    continue;
+                }
+#else
                 g_frf_msc_slot=g_slot_id;
+#endif
                 ++frf_r112_msc_registered;
                 ++g_r97_next_bank;
                 /* R115: register capacity before scanning more potentially
@@ -3452,6 +3548,22 @@ static int hub_scan_children(void)
         return 1;
     }
 
+#if defined(FRF_PI4_USB_MASS_MULTI)
+    /* R133: every discovered MSC already has a live, independent xHCI slot.
+     * The old single-boot-device fallback would RESET and RE-ADDRESS the
+     * first disk a second time, invalidating its registered BOT context.
+     * Return with the root hub selected, leaving all disks untouched. */
+    if(g_r133_msc_count){
+        g_slot_id=g_root_hub_slot;
+        g_port_speed=g_root_hub_speed;g_ep0_mps=root_ep0_mps;
+        g_ep0_ring=root_ep0_ring;
+        g_host=root_info;
+        g_host.msc_ready=1u;g_host.state=FRFXHCI_HOST_MASS_STORAGE;
+        kprintf("[R133-MSC] hub scan complete: %u independent BOT slots\n",
+                g_r133_msc_count);
+        return 1;
+    }
+#endif
     if (!boot_port) {
         /* No mass storage or supported boot-mouse child. */
         g_slot_id=g_root_hub_slot; g_port_speed=g_root_hub_speed; g_ep0_mps=root_ep0_mps; g_ep0_ring=root_ep0_ring;
@@ -3783,6 +3895,15 @@ static int host_scan_cpu1(void)
     g_slot_id = 0;
     g_bulk_in_dci = g_bulk_out_dci = 0;
     g_frf_msc_slot=0u;
+#if defined(FRF_PI4_USB_MASS_MULTI)
+    frf_zero_bytes(g_r133_msc,sizeof(g_r133_msc));
+    g_r133_msc_count=0u;
+    g_r133_msc_iface_last=0u;
+    /* A new scan invalidates old per-LUN addresses. Do not keep exposing
+     * disk units from a prior xHCI controller generation. */
+    extern void frf_pi4_um_reset(void);
+    frf_pi4_um_reset();
+#endif
     frf_r112_msc_seen=frf_r112_msc_registered=0u;
     frf_r112_msc_uasp=frf_r112_msc_config_errors=0u;
     frf_r112_msc_last_vidpid=0u;
@@ -3832,7 +3953,15 @@ static int host_scan_cpu1(void)
     }
 #if defined(FRF_PI4_USB_MASS_RO)
     /* Root-attached MSC was configured by parse_and_configure. */
+#if defined(FRF_PI4_USB_MASS_MULTI)
+    if(g_host.msc_ready && g_r133_msc_count==0u) {
+        (void)frf_r133_register_msc(g_host.interface_number,
+                                   g_host.vid,g_host.pid);
+        frf_pi4_um_probe_inline();
+    }
+#else
     if (g_host.msc_ready && !g_frf_msc_slot) g_frf_msc_slot=g_slot_id;
+#endif
 #endif
     frf_sdlog_xhci_stage = 50u;
     frf_usb_host_phase=0x40u;
@@ -3911,9 +4040,39 @@ static int bulk_transfer(struct XHCIRing *ring, uint32_t dci, void *data,
 }
 
 uint32_t frf_xhci_host_msc_slot(void) { return g_frf_msc_slot; }
+#if defined(FRF_PI4_USB_MASS_MULTI)
+uint32_t frf_xhci_host_msc_count(void) { return g_r133_msc_count; }
+uint32_t frf_xhci_host_msc_slot_at(uint32_t index)
+{
+    return index<g_r133_msc_count?g_r133_msc[index].slot:0u;
+}
+uint32_t frf_xhci_host_msc_max_lun(uint32_t index)
+{
+    return index<g_r133_msc_count?g_r133_msc[index].max_lun:0u;
+}
+int frf_xhci_host_msc_bulk_in(uint32_t index,void *data,
+                             uint32_t length,uint32_t *actual)
+{
+    if(index>=g_r133_msc_count)return 0;
+    struct R133MSC *m=&g_r133_msc[index];
+    g_slot_id=m->slot;
+    return bulk_transfer(&m->in_ring,m->in_dci,data,length,1,actual);
+}
+int frf_xhci_host_msc_bulk_out(uint32_t index,const void *data,
+                              uint32_t length,uint32_t *actual)
+{
+    if(index>=g_r133_msc_count)return 0;
+    struct R133MSC *m=&g_r133_msc[index];
+    g_slot_id=m->slot;
+    return bulk_transfer(&m->out_ring,m->out_dci,(void *)(uintptr_t)data,
+                         length,0,actual);
+}
+#endif
 int frf_xhci_host_bulk_in(void *data, uint32_t length, uint32_t *actual)
 {
-#if defined(FRF_PI4_USB_MASS_RO)
+#if defined(FRF_PI4_USB_MASS_MULTI)
+    return frf_xhci_host_msc_bulk_in(0u,data,length,actual);
+#elif defined(FRF_PI4_USB_MASS_RO)
     if (!g_frf_msc_slot) return 0;
     g_slot_id=g_frf_msc_slot;
 #else
@@ -3924,7 +4083,9 @@ int frf_xhci_host_bulk_in(void *data, uint32_t length, uint32_t *actual)
 
 int frf_xhci_host_bulk_out(const void *data, uint32_t length, uint32_t *actual)
 {
-#if defined(FRF_PI4_USB_MASS_RO)
+#if defined(FRF_PI4_USB_MASS_MULTI)
+    return frf_xhci_host_msc_bulk_out(0u,data,length,actual);
+#elif defined(FRF_PI4_USB_MASS_RO)
     if (!g_frf_msc_slot) return 0;
     g_slot_id=g_frf_msc_slot;
 #else

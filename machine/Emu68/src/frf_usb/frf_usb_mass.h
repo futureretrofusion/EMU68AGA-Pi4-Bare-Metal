@@ -14,6 +14,33 @@
 #define FRF_UM_BOARD_BYTES 65536u
 #define FRF_UM_SECTOR_SIZE 512u
 #define FRF_UM_MAX_SECTORS 16u
+/* Additive extension at an unused offset in the 64 KiB Zorro-II FRUM
+ * board, leaving the original FRUM v1 header/data and sizeof unchanged.
+ * The existing v0.5 AmigaOS driver still sees unit 0 unchanged. */
+#define FRF_UM_EXT_OFFSET   0x2200u
+#define FRF_UM_EXT_MAGIC    0x46525532u /* "FRU2" */
+#define FRF_UM_EXT_VERSION  2u
+#define FRF_UM_MAX_UNITS    8u
+#define FRF_UM_UNIT_WRITE   (1u<<0)
+#define FRF_UM_UNIT_RDB     (1u<<1)
+struct frf_um_ext_unit {
+    volatile uint32_t present;
+    volatile uint32_t capacity;
+    volatile uint32_t sector_size;
+    volatile uint32_t media_change;
+    volatile uint32_t flags;
+    volatile uint32_t slot;
+    volatile uint32_t lun;
+    volatile uint32_t last_error;
+};
+struct frf_um_extension {
+    volatile uint32_t magic;
+    volatile uint32_t version;
+    volatile uint32_t count;
+    volatile uint32_t request_unit;
+    struct frf_um_ext_unit units[FRF_UM_MAX_UNITS];
+};
+
 
 #define FRF_UM_IDLE   0u
 #define FRF_UM_REQ    1u
@@ -43,6 +70,9 @@ struct frf_um_shared {
 };
 typedef char frf_um_data_offset_check[
     (__builtin_offsetof(struct frf_um_shared,data)==64u) ? 1 : -1];
+typedef char frf_um_ext_size_check[
+    ((FRF_UM_EXT_OFFSET+sizeof(struct frf_um_extension) <= FRF_UM_BOARD_BYTES) &&
+     (FRF_UM_EXT_OFFSET >= sizeof(struct frf_um_shared))) ? 1 : -1];
 typedef char frf_um_board_size_check[
     (sizeof(struct frf_um_shared) <= FRF_UM_BOARD_BYTES) ? 1 : -1];
 #endif

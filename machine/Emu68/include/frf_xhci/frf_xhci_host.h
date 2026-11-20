@@ -123,6 +123,16 @@ int frf_xhci_host_control(uint8_t request_type, uint8_t request,
 /* R111: registered boot-present mass-storage slot survives HID enumeration.
  * Exclusively CPU1: one BOT transport (no hotplug or writes). */
 uint32_t frf_xhci_host_msc_slot(void);
+/* R133: each physical BOT interface owns an independent slot and xHCI
+ * transfer-ring pair; LUN selection occurs in the SCSI CBW on CPU1. */
+uint32_t frf_xhci_host_msc_count(void);
+uint32_t frf_xhci_host_msc_slot_at(uint32_t index);
+uint32_t frf_xhci_host_msc_max_lun(uint32_t index);
+int frf_xhci_host_msc_bulk_in(uint32_t index,void *data,
+                              uint32_t length,uint32_t *actual);
+int frf_xhci_host_msc_bulk_out(uint32_t index,const void *data,
+                               uint32_t length,uint32_t *actual);
+
 int frf_xhci_host_bulk_in(void *data, uint32_t length, uint32_t *actual);
 int frf_xhci_host_bulk_out(const void *data, uint32_t length, uint32_t *actual);
 
