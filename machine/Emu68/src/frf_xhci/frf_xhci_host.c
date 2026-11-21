@@ -340,9 +340,10 @@ struct NativeHID {
        completions from a stopped ring can never match the first new TD
        after reset; h->bank indexes xHCI DMA contexts, not HID devices. */
     uint32_t ring_bank,ring_epoch;
-    /* 0 means external/cascaded hub child (not yet hotpluggable).
-     * Direct Pi4 internal hub ports retain the same HID index on reconnect. */
-    uint32_t hub_port;
+    /* A physical hub port is scoped to parent_hub_slot: 0 for the
+     * internal Pi4 hub, otherwise an xHCI slot of an external hub.
+     * Retain stable HID indices across re-enumeration. */
+    uint32_t hub_port, parent_hub_slot;
     uint32_t idle_noted;  /* R129: one diagnostic per outstanding idle TD */
     uint64_t retry_after_cnt,pending_since_cnt;
     uint64_t pending;
@@ -427,8 +428,17 @@ static uint32_t g_r134_hub_snapshot_valid;
 volatile uint32_t frf_r135_hid_pending_mask,frf_r135_hid_reconnected;
 volatile uint32_t frf_r135_hid_disconnected,frf_r135_hid_failed;
 volatile uint32_t frf_r135_hid_last_port,frf_r135_hid_last_stage;
-static uint32_t g_r135_hid_retry[16];
-static uint64_t g_r135_hid_next_retry[16];
+/* Index 0 is Pi4 internal hub; indices 1/2 are cascaded USB2 hubs. */
+static uint32_t g_r135_hid_retry[1u+R97_MAX_EXTERNAL_HUBS][16];
+static uint64_t g_r135_hid_next_retry[1u+R97_MAX_EXTERNAL_HUBS][16];
+#if defined(FRF_PI4_NATIVE_HOTPLUG_EXTERNAL)
+volatile uint32_t frf_r136_external_attached[R97_MAX_EXTERNAL_HUBS];
+volatile uint32_t frf_r136_external_pending[R97_MAX_EXTERNAL_HUBS];
+volatile uint32_t frf_r136_external_fail[R97_MAX_EXTERNAL_HUBS];
+volatile uint32_t frf_r136_external_events[R97_MAX_EXTERNAL_HUBS];
+static uint32_t g_r136_external_known[R97_MAX_EXTERNAL_HUBS];
+static uint64_t g_r136_external_next_poll;
+#endif
 static uint32_t g_r135_new_ring_epoch;
 
 
@@ -437,6 +447,9 @@ static void frf_r99_monitor_root_port(void);
 static int hub_port_feature(uint32_t port, uint16_t feature, int set);
 #if defined(FRF_PI4_NATIVE_HOTPLUG_REENUM)
 static void frf_r135_hotplug_service(void);
+#if defined(FRF_PI4_NATIVE_HOTPLUG_EXTERNAL)
+static void frf_r136_monitor_external(void);
+#endif
 #endif
 #endif
 
@@ -1523,7 +1536,7 @@ static uint32_t r121_boot_hid_count(void)
     return count;
 }
 static int r121_configure_composite(uint32_t cfg,uint32_t vid,uint32_t pid,
-                                    uint32_t root_port)
+                                    uint32_t root_port,uint32_t parent_slot)
 {
     struct R121HIDIf *chosen[R121_HID_IF_MAX];
     struct XHCIRing rings[R121_HID_IF_MAX];
@@ -1592,6 +1605,7 @@ static int r121_configure_composite(uint32_t cfg,uint32_t vid,uint32_t pid,
         h->ring=rings[n];h->ep0=g_ep0_ring;
         h->ring_bank=first_bank+n;
         h->hub_port=root_port;
+        h->parent_hub_slot=parent_slot;
         h->valid=1u;
         ++g_native_count;
         kprintf("[R121-HID] LIVE slot%u HID%u if%u ep%u proto%u desc%u bank%u\n",
@@ -1856,7 +1870,10 @@ int frf_xhci_host_native_poll_any(void *dst,uint32_t capacity,
        state while HID endpoints are running. Synchronous completion
        helper retains unrelated xHCI Transfer Events for later dispatch. */
 #if defined(FRF_PI4_NATIVE_HOTPLUG_PROBE)
-    frf_r99_monitor_root_port(); /* R135 CPU1 hub status + change events */
+    frf_r99_monitor_root_port(); /* R136 CPU1 status and change events */
+#if defined(FRF_PI4_NATIVE_HOTPLUG_EXTERNAL)
+    frf_r136_monitor_external();
+#endif
 #if defined(FRF_PI4_NATIVE_HOTPLUG_REENUM)
     frf_r135_hotplug_service();
 #endif
@@ -2288,7 +2305,8 @@ static void frf_r99_monitor_root_port(void)
 #if defined(FRF_PI4_NATIVE_HOTPLUG_REENUM)
         for(uint32_t i=0u;i<g_native_count;i++) {
             uint32_t port=g_native_hid[i].hub_port;
-            if(port && !(known&(1u<<port)) &&
+            if(port && g_native_hid[i].parent_hub_slot==0u &&
+               !(known&(1u<<port)) &&
                (good&(1u<<port)) && !(now_attached&(1u<<port)))
                 frf_r135_hid_pending_mask|=1u<<port;
         }
@@ -2299,8 +2317,8 @@ static void frf_r99_monitor_root_port(void)
             frf_r135_hid_pending_mask|=events;
             for(uint32_t port=1u;port<=limit;port++)
                 if(events&(1u<<port)) {
-                    g_r135_hid_retry[port]=0u;
-                    g_r135_hid_next_retry[port]=0u;
+                    g_r135_hid_retry[0][port]=0u;
+                    g_r135_hid_next_retry[0][port]=0u;
                 }
 #endif
             frf_r134_hub_connect_events+=__builtin_popcount(arrivals);
@@ -2743,345 +2761,7 @@ static int hub_parse_child(struct FRFXHCIHubDeviceInfo *d,
     return 1;
 }
 
-#if defined(FRF_PI4_NATIVE_HOTPLUG_REENUM)
-/* R135: never re-initialize the xHCI controller, scan unrelated ports,
- * or borrow an MSC/hub slot. Restore the existing interfaces in their
- * original CPU1 HID indices, whether single or composite receiver.
- * Direct Pi4 internal USB2 hub ports only; external hubs are separate.
- * Keep its HID index stable: the ARM input parser is keyed by that index.
- * Called exclusively by CPU1, between normal interrupt-IN polling rounds. */
-/* Recreate all endpoint contexts of a known composite USB receiver as
- * one atomic xHC Configure Endpoint command. Each interface keeps its
- * original DMA bank and ARM input index, avoiding a second global scan. */
-static int frf_r135_restore_composite(uint32_t port,uint32_t cfg,
-                                      uint32_t vid,uint32_t pid,
-                                      uint32_t found)
-{
-    struct R121HIDIf *selected[R121_HID_IF_MAX];
-    uint32_t indices[R121_HID_IF_MAX],epochs[R121_HID_IF_MAX];
-    struct XHCIRing rings[R121_HID_IF_MAX];
-    uint32_t count=0u,flags=1u,maxdci=1u;
-    if(found>R121_HID_IF_MAX || r121_boot_hid_count()<found)return 0;
-    for(uint32_t idx=0u;idx<g_native_count;idx++) {
-        struct NativeHID *h=&g_native_hid[idx];
-        if(h->hub_port!=port)continue;
-        if(count>=found || h->slot || h->vid!=vid || h->pid!=pid ||
-           (h->protocol!=USB_HID_PROTOCOL_MOUSE &&
-            h->protocol!=USB_HID_PROTOCOL_KEYBOARD))return 0;
-        struct R121HIDIf *iface=NULL;
-        for(uint32_t j=0u;j<g_r121_hid_if_count;j++)
-            if(g_r121_hid_if[j].iface==h->interface &&
-               g_r121_hid_if[j].protocol==h->protocol &&
-               g_r121_hid_if[j].ep==h->ep &&
-               g_r121_hid_if[j].mps) {
-                iface=&g_r121_hid_if[j];break;
-            }
-        if(!iface || (h->report_desc_length &&
-           iface->report_length!=h->report_desc_length))return 0;
-        uint32_t dci=iface->ep*2u+1u;
-        if(dci>31u || (flags&(1u<<dci)))return 0;
-        indices[count]=idx;selected[count]=iface;
-        epochs[count]=h->ring_epoch^1u;
-        flags|=1u<<dci;
-        if(dci>maxdci)maxdci=dci;
-        ++count;
-    }
-    if(count!=found)return 0;
-    host_zero(g_input_context,sizeof(g_input_context));
-    context_write32(input_ctx(0u),1u,flags);
-    fill_slot_context(maxdci);
-    for(uint32_t n=0u;n<count;n++) {
-        struct NativeHID *h=&g_native_hid[indices[n]];
-        struct R121HIDIf *i=selected[n];
-        uint32_t interval=i->interval?i->interval:1u,xint=0u;
-        if(g_port_speed>=3u) {
-            if(interval>16u)interval=16u;
-            xint=interval-1u;
-        } else {
-            uint32_t uf=interval*8u;
-            while(uf>1u){++xint;uf>>=1u;}
-            if(xint<3u)xint=3u;
-            if(xint>10u)xint=10u;
-        }
-        ring_init(&rings[n],
-                  &g_hid_in_trbs[h->ring_bank]
-                     [epochs[n]*(XHCI_RING_TRBS*2u)],XHCI_RING_TRBS);
-        fill_ep_context(i->ep*2u+1u,&rings[n],7u,i->mps,xint);
-    }
-    host_cache_clean(g_input_context,sizeof(g_input_context));
-    if(!command_submit(XHCI_CMD_CONFIG_EP,host_dma(g_input_context),
-                       g_slot_id<<24,1500u,NULL))return 0;
-    if(!frf_xhci_host_control(0u,USB_REQ_SET_CONFIGURATION,
-                   (uint16_t)cfg,0u,NULL,0u,0,NULL))return 0;
-    for(uint32_t n=0u;n<count;n++)
-        (void)frf_xhci_host_control(0x21u,USB_REQ_SET_PROTOCOL,0u,
-                   (uint16_t)selected[n]->iface,NULL,0u,0,NULL);
-    for(uint32_t n=0u;n<count;n++) {
-        struct NativeHID *h=&g_native_hid[indices[n]];
-        h->slot=g_slot_id;
-        h->mps=selected[n]->mps;
-        h->dci=selected[n]->ep*2u+1u;
-        h->ring=rings[n];h->ep0=g_ep0_ring;
-        h->ring_epoch=epochs[n];
-        h->pending=h->pending_length=0u;
-        h->failures=h->recover_count=0u;
-        h->recover_pending=h->recover_stop=0u;
-        h->retry_after_cnt=h->pending_since_cnt=0u;
-        h->idle_noted=0u;
-        h->valid=1u;
-        frf_r92_recovery_state[indices[n]]=0u;
-        frf_r88_hid_last_cnt[indices[n]]=0u;
-        if(h->protocol==USB_HID_PROTOCOL_MOUSE) {
-            extern volatile uint8_t frf_usb_mouse_present;
-            __atomic_store_n(&frf_usb_mouse_present,1u,__ATOMIC_RELEASE);
-        }
-    }
-    return 1;
-}
 
-static void frf_r135_hotplug_service(void)
-{
-    uint32_t pending=frf_r135_hid_pending_mask;
-    if(!pending || !g_root_hub_slot || !g_hub_num_ports)return;
-    uint64_t now=host_counter(),hz=host_counter_hz();
-    if(!hz)hz=54000000u;
-    for(uint32_t port=1u;port<=g_hub_num_ports && port<16u;port++) {
-        uint32_t bit=1u<<port;
-        if(!(pending&bit))continue;
-        if(g_r135_hid_retry[port]>=5u)continue;
-        if(g_r135_hid_next_retry[port] && now<g_r135_hid_next_retry[port])continue;
-        frf_r135_hid_last_port=port;
-        uint32_t index=FRF_NATIVE_HID_MAX,found=0u;
-        for(uint32_t i=0u;i<g_native_count;i++) {
-            if(g_native_hid[i].hub_port==port) { index=i; ++found; }
-        }
-        /* Never hotplug a composite receiver, attached storage, or a hub
-         * until their parent+interface lifecycle is supported atomically. */
-        uint32_t protected_port=0u;
-        for(uint32_t d=0u;d<g_hub_device_count;d++)
-            if(g_hub_devices[d].hub_port==port &&
-               (g_hub_devices[d].mass_storage || g_hub_devices[d].is_hub))
-                protected_port=1u;
-        if(!found || found>R121_HID_IF_MAX || protected_port) {
-            frf_r135_hid_pending_mask&=~bit;
-            continue;
-        }
-        struct NativeHID *h=&g_native_hid[index];
-        uint32_t retired_slot=h->slot;
-        uint32_t mixed_slots=0u;
-        for(uint32_t i=0u;i<g_native_count;i++)
-            if(g_native_hid[i].hub_port==port &&
-               g_native_hid[i].slot!=h->slot)mixed_slots=1u;
-        if(mixed_slots) {
-            ++frf_r135_hid_failed;
-            frf_r135_hid_pending_mask&=~bit;
-            continue;
-        }
-        /* Disable Slot ends ownership of all outstanding TDs belonging to
-         * the old physical device. Until successful completion, do not
-         * repurpose its DCBAA entry or DMA ring memory. */
-        if(h->slot) {
-            uint32_t old_slot=h->slot;
-            for(uint32_t i=0u;i<g_native_count;i++) {
-                struct NativeHID *item=&g_native_hid[i];
-                if(item->hub_port!=port)continue;
-                if(item->valid) {
-                    /* Only physical link change, never an idle NAK. */
-                    if(item->protocol==USB_HID_PROTOCOL_MOUSE) {
-                        extern volatile uint8_t frf_usb_mouse_present;
-                        extern volatile uint8_t frf_usb_mouse_buttons;
-                        const uint8_t release[3]={0u,0u,0u};
-                        frf_native_usb_mouse_report(release,3u);
-                        __atomic_store_n(&frf_usb_mouse_buttons,0u,__ATOMIC_RELEASE);
-                        __atomic_store_n(&frf_usb_mouse_present,0u,__ATOMIC_RELEASE);
-                    } else if(item->protocol==USB_HID_PROTOCOL_KEYBOARD) {
-                        const uint8_t release[8]={0u};
-                        frf_native_usb_keyboard_report(release);
-                    } else if(item->protocol==0u) {
-                        /* Pad state is currently global: never release
-                         * another independent receiver's held buttons. */
-                        uint32_t peers=0u;
-                        for(uint32_t j=0u;j<g_native_count;j++)
-                            if(g_native_hid[j].valid &&
-                               g_native_hid[j].hub_port!=port &&
-                               g_native_hid[j].protocol==0u)++peers;
-                        if(!peers)frf_native_usb_pad_release();
-                    }
-                }
-                item->valid=0u;item->pending=0u;
-                item->pending_since_cnt=0u;
-                item->recover_pending=0u;
-                item->idle_noted=0u;
-            }
-            frf_r135_hid_last_stage=2u;
-            if(!command_submit(XHCI_CMD_DISABLE_SLOT,0u,
-                              old_slot<<24,1000u,NULL)) {
-                frf_r135_hid_last_stage=0xe2u;
-                ++frf_r135_hid_failed;
-                ++g_r135_hid_retry[port];
-                g_r135_hid_next_retry[port]=now+hz;
-                break;
-            }
-            for(uint32_t i=0u;i<g_native_count;i++)
-                if(g_native_hid[i].hub_port==port)
-                    g_native_hid[i].slot=0u;
-            g_dcbaa[old_slot]=0u;
-            host_cache_clean(&g_dcbaa[old_slot],sizeof(g_dcbaa[old_slot]));
-            ++frf_r135_hid_disconnected;
-            frf_r130_post_hid_discovered();
-            kprintf("[R135-HID] port%u old slot%u disabled (%u interfaces)\n",
-                    port,old_slot,found);
-        }
-        if(!(frf_r134_hub_attached_mask&bit)) {
-            /* Wait for next C_PORT_CONNECTION or attached-state transition.
-             * A removed mouse is not an idle/stalled HID endpoint. */
-            frf_r135_hid_pending_mask&=~bit;
-            break;
-        }
-
-        /* Preserve all global EP0/port state used by other child devices.
-         * Reset/address targets ONLY this hub downstream port. */
-        const uint32_t old_bank=g_native_bank,old_slot=g_slot_id,
-              old_speed=g_port_speed,old_mps=g_ep0_mps,
-              old_route=g_route_string,old_root=g_root_hub_port,
-              old_hub=g_slot_hub,old_nports=g_slot_num_ports,
-              old_tt_slot=g_tt_hub_slot,old_tt_port=g_tt_port,
-              old_tt_think=g_tt_think_time,old_epoch=g_r135_new_ring_epoch;
-        const struct XHCIRing old_ep0=g_ep0_ring;
-        const uint32_t epoch=h->ring_epoch^1u;
-        g_native_bank=h->ring_bank;
-        g_r135_new_ring_epoch=epoch;
-        g_slot_id=g_root_hub_slot;
-        g_port_speed=g_root_hub_speed;
-        g_ep0_mps=g_r99_root_ep0_mps;
-        g_ep0_ring=g_r99_root_ep0_ring;
-        g_route_string=0u;g_root_hub_port=g_selected_root_port;
-        g_slot_hub=1u;g_slot_num_ports=g_hub_num_ports;
-        g_tt_hub_slot=g_tt_port=g_tt_think_time=0u;
-        uint32_t speed=0u,configured=0u,addressed=0u;
-        frf_r135_hid_last_stage=3u;
-        int reset_ok=hub_reset_downstream_port(port,&speed);
-        /* A failed EP0 request still consumes software TRBs. Keep the
-         * root-hub control ring synchronized even when reset fails. */
-        g_r99_root_ep0_ring=g_ep0_ring;
-        if(reset_ok && speed) {
-            frf_r135_hid_last_stage=4u;
-            if(address_child_device(port,speed,g_root_hub_slot,
-                                    g_root_hub_speed,g_hub_tt_think_time,
-                                    0u,0u)) {
-                addressed=1u;
-                struct FRFXHCIHubDeviceInfo d;
-                frf_zero_bytes(&d,sizeof(d));
-                d.hub_port=port;
-                d.speed_id=speed;
-                d.slot_id=g_slot_id;
-                uint32_t ie=0u,oe=0u,im=0u,om=0u,cfg=0u;
-                uint32_t he=0u,hm=0u,hi=0u,iface=0xffffffffu;
-                frf_r135_hid_last_stage=5u;
-                int parsed=hub_parse_child(&d,&ie,&oe,&im,&om,&cfg,
-                                   &he,&hm,&hi,&iface);
-                if(parsed && !d.mass_storage && !d.is_hub &&
-                   d.vid==h->vid && d.pid==h->pid &&
-                   found>1u) {
-                    frf_r135_hid_last_stage=6u;
-                    if(frf_r135_restore_composite(port,cfg,d.vid,d.pid,found))
-                        configured=1u;
-                } else if(parsed && found==1u &&
-                   !d.mass_storage && !d.is_hub &&
-                   d.vid==h->vid && d.pid==h->pid &&
-                   d.interface_class==USB_CLASS_HID &&
-                   d.interface_protocol==h->protocol &&
-                   iface==h->interface && he && hm &&
-                   r121_boot_hid_count()<2u) {
-                    frf_r135_hid_last_stage=6u;
-                    if(configure_interrupt_in(he,hm,hi) &&
-                       frf_xhci_host_control(0u,USB_REQ_SET_CONFIGURATION,
-                          (uint16_t)cfg,0u,NULL,0u,0,NULL)) {
-                        if(h->protocol==USB_HID_PROTOCOL_KEYBOARD ||
-                           h->protocol==USB_HID_PROTOCOL_MOUSE)
-                            (void)frf_xhci_host_control(0x21u,
-                                USB_REQ_SET_PROTOCOL,0u,(uint16_t)iface,
-                                NULL,0u,0,NULL);
-                        /* Stable index lets frf_xhci_hid.c keep its
-                         * descriptor-based report ID / pad decoder. */
-                        h->slot=g_slot_id;
-                        h->dci=g_hid_in_dci;
-                        h->ep=he;h->mps=hm;
-                        h->report_desc_length=g_r91_last_report_descriptor_length;
-                        h->ring=g_hid_in_ring;h->ep0=g_ep0_ring;
-                        h->ring_epoch=epoch;
-                        h->out_ep=g_r96_hid_out_ep;
-                        h->out_dci=g_hid_out_dci;
-                        h->out_mps=g_r96_hid_out_mps;
-                        if(g_hid_out_dci)h->out_ring=g_hid_out_ring;
-                        h->pending=h->pending_length=0u;
-                        h->failures=h->recover_count=0u;
-                        h->recover_pending=h->recover_stop=0u;
-                        h->retry_after_cnt=h->pending_since_cnt=0u;
-                        h->idle_noted=0u;
-                        h->valid=1u;
-                        if(h->protocol==USB_HID_PROTOCOL_MOUSE) {
-                            extern volatile uint8_t frf_usb_mouse_present;
-                            __atomic_store_n(&frf_usb_mouse_present,1u,__ATOMIC_RELEASE);
-                        }
-                        frf_r92_recovery_state[index]=0u;
-                        frf_r88_hid_last_cnt[index]=0u;
-                        configured=1u;
-                    }
-                } else {
-                    kprintf("[R135-HID] port%u changed descriptor or unsupported composite\n",port);
-                }
-            }
-        }
-        if(addressed && !configured)hub_disable_current_child();
-        if(configured) {
-            frf_r135_hid_last_stage=7u;
-            frf_r135_hid_pending_mask&=~bit;
-            frf_r94_usb_pending_mask&=~bit;
-            frf_r89_native_live_mask|=bit;
-            frf_r94_usb_live_mask|=bit;
-            ++frf_r135_hid_reconnected;
-            g_r135_hid_retry[port]=0u;
-            frf_r130_post_hid_discovered();
-            kprintf("[R135-HID] port%u slot%u %u HID interface(s) restored\n",
-                    port,g_slot_id,found);
-        }
-        if(!configured) {
-            ++frf_r135_hid_failed;
-            ++g_r135_hid_retry[port];
-            frf_r135_hid_last_stage=0xe0u | (frf_r135_hid_last_stage&15u);
-            g_r135_hid_next_retry[port]=host_counter()+hz;
-            kprintf("[R135-HID] port%u re-enum failed attempt%u stage=%02x\n",
-                    port,g_r135_hid_retry[port],frf_r135_hid_last_stage);
-        }
-        /* Ring for root control transfers may have advanced during reset.
-         * Only the selected child endpoint is rebuilt; MSC and peer
-         * HID descriptor/ring states remain exactly as they were. */
-        if(old_slot==g_root_hub_slot ||
-           (retired_slot && old_slot==retired_slot)) {
-            /* Old selected slot was the hub or the disconnected device:
-             * do not restore a stale EP0 pointer / disabled slot. */
-            g_slot_id=g_root_hub_slot;
-            g_port_speed=g_root_hub_speed;
-            g_ep0_mps=g_r99_root_ep0_mps;
-            g_ep0_ring=g_r99_root_ep0_ring;
-            g_route_string=0u;g_root_hub_port=g_selected_root_port;
-            g_slot_hub=1u;g_slot_num_ports=g_hub_num_ports;
-            g_tt_hub_slot=g_tt_port=g_tt_think_time=0u;
-        } else {
-            g_slot_id=old_slot;g_port_speed=old_speed;g_ep0_mps=old_mps;
-            g_ep0_ring=old_ep0;
-            g_route_string=old_route;g_root_hub_port=old_root;
-            g_slot_hub=old_hub;g_slot_num_ports=old_nports;
-            g_tt_hub_slot=old_tt_slot;g_tt_port=old_tt_port;
-            g_tt_think_time=old_tt_think;
-        }
-        g_native_bank=old_bank;
-        g_r135_new_ring_epoch=old_epoch;
-        break; /* one physical port per service round */
-    }
-}
-#endif /* FRF_PI4_NATIVE_HOTPLUG_REENUM */
 
 /* R97 Huasheng 214b:7260: keep individual hub slots/rings live and
  * enumerate up to TWO external high-speed hubs chained after the Pi4
@@ -3316,7 +2996,7 @@ static int r97_scan_hub(struct R97HubState *hub)
         }
 #endif
         if(r121_boot_hid_count()>=2u &&
-           r121_configure_composite(cfg,d->vid,d->pid,0u)) {
+           r121_configure_composite(cfg,d->vid,d->pid,port,hub->slot)) {
             frf_r97_ext_live_mask|=1u<<port;
             frf_r97_ext_stage=7u;
             continue;
@@ -3347,6 +3027,7 @@ static int r97_scan_hub(struct R97HubState *hub)
                 if(g_hid_out_dci)h->out_ring=g_hid_out_ring;
                 h->ring=g_hid_in_ring;h->ep0=g_ep0_ring;
                 h->ring_bank=g_native_bank;h->ring_epoch=0u;
+                h->hub_port=port;h->parent_hub_slot=hub->slot;
                 h->pending=0u;h->pending_length=0u;
                 h->failures=0u;h->valid=1u;
                 ++g_native_count;
@@ -3371,6 +3052,473 @@ static int r97_scan_hub(struct R97HubState *hub)
     if(!frf_r97_ext_error)frf_r97_ext_stage=8u;
     return 1;
 }
+
+#if defined(FRF_PI4_NATIVE_HOTPLUG_EXTERNAL)
+/* R136: each external USB2 hub owns an independent EP0 ring, port bitmap,
+ * and status-change latch. The R135 root monitor cannot see downstream
+ * child changes when the upstream hub stays connected. Never reset the
+ * parent hub or unrelated HID/MSC slots just to read child port status. */
+static void frf_r136_monitor_external(void)
+{
+    if(!g_r97_hub_used)return;
+    uint64_t hz=host_counter_hz();
+    if(!hz)hz=54000000u;
+    uint64_t now=host_counter();
+    if(g_r136_external_next_poll && now<g_r136_external_next_poll)return;
+    g_r136_external_next_poll=now+hz*2u;
+    const uint32_t saved_slot=g_slot_id,saved_speed=g_port_speed,
+           saved_mps=g_ep0_mps,saved_route=g_route_string,
+           saved_root=g_root_hub_port,saved_hub=g_slot_hub,
+           saved_num_ports=g_slot_num_ports,saved_tt_slot=g_tt_hub_slot,
+           saved_tt_port=g_tt_port,saved_tt_think=g_tt_think_time;
+    struct XHCIRing saved_ring=g_ep0_ring;
+    for(uint32_t k=0u;k<g_r97_hub_used && k<R97_MAX_EXTERNAL_HUBS;k++) {
+        struct R97HubState *hub=&g_r97_external[k];
+        if(!hub->live || !hub->slot || !hub->ports)continue;
+        /* Parent hub itself is unavailable after root-link removal. Do
+         * not submit doomed GET_STATUS requests until it comes back. */
+        uint32_t root_port=hub->route&15u;
+        if(root_port && g_r134_hub_snapshot_valid&(1u<<root_port) &&
+           !(frf_r134_hub_attached_mask&(1u<<root_port)))continue;
+        r97_select_hub(hub);
+        uint32_t good=0u,attached=0u,changed=0u;
+        for(uint32_t port=1u;port<=hub->ports && port<16u;port++) {
+            uint16_t st=0u,ch=0u;
+            if(!hub_port_status(port,&st,&ch)) {
+                ++frf_r136_external_fail[k];
+                hub->ep0=g_ep0_ring;
+                continue;
+            }
+            good|=1u<<port;
+            if(st&USB_HUB_PORT_CONNECTION)attached|=1u<<port;
+            if(ch&1u) {
+                changed|=1u<<port;
+                if(!hub_port_feature(port,USB_HUB_FEAT_C_PORT_CONNECTION,0))
+                    ++frf_r136_external_fail[k];
+            }
+            hub->ep0=g_ep0_ring;
+        }
+        uint32_t known=g_r136_external_known[k];
+        uint32_t updated=(frf_r136_external_attached[k]&~good)|
+                         (attached&good);
+        uint32_t connected=(updated&~frf_r136_external_attached[k])&known;
+        uint32_t removed=(frf_r136_external_attached[k]&~updated)&known;
+        uint32_t events=connected|removed|(changed&known);
+        for(uint32_t i=0u;i<g_native_count;i++) {
+            struct NativeHID *h=&g_native_hid[i];
+            uint32_t port=h->hub_port;
+            if(h->parent_hub_slot==hub->slot && port && port<16u &&
+               !(known&(1u<<port)) &&
+               (good&(1u<<port)) && !(updated&(1u<<port)))
+                events|=1u<<port;
+        }
+        if(events) {
+            ++frf_r136_external_events[k];
+            frf_r136_external_pending[k]|=events;
+            for(uint32_t port=1u;port<=hub->ports && port<16u;port++)
+                if(events&(1u<<port)) {
+                    g_r135_hid_retry[k+1u][port]=0u;
+                    g_r135_hid_next_retry[k+1u][port]=0u;
+                }
+            kprintf("[R136-HID] hub%u slot%u changed=%04x attached=%04x removed=%04x\n",
+                    k,hub->slot,events,connected,removed);
+        }
+        frf_r136_external_attached[k]=updated;
+        g_r136_external_known[k]=known|good;
+        /* In case the caller had this very hub selected, restore the
+         * advanced EP0 state rather than its stale ring pointer. */
+        if(saved_slot==hub->slot)saved_ring=hub->ep0;
+    }
+    g_slot_id=saved_slot;g_port_speed=saved_speed;
+    g_ep0_mps=saved_mps;g_ep0_ring=saved_ring;
+    g_route_string=saved_route;g_root_hub_port=saved_root;
+    g_slot_hub=saved_hub;g_slot_num_ports=saved_num_ports;
+    g_tt_hub_slot=saved_tt_slot;g_tt_port=saved_tt_port;
+    g_tt_think_time=saved_tt_think;
+}
+#endif /* FRF_PI4_NATIVE_HOTPLUG_EXTERNAL */
+
+#if defined(FRF_PI4_NATIVE_HOTPLUG_REENUM)
+/* R135: never re-initialize the xHCI controller, scan unrelated ports,
+ * or borrow an MSC/hub slot. Restore the existing interfaces in their
+ * original CPU1 HID indices, whether single or composite receiver.
+ * Direct Pi4 internal USB2 hub ports only; external hubs are separate.
+ * Keep its HID index stable: the ARM input parser is keyed by that index.
+ * Called exclusively by CPU1, between normal interrupt-IN polling rounds. */
+/* Recreate all endpoint contexts of a known composite USB receiver as
+ * one atomic xHC Configure Endpoint command. Each interface keeps its
+ * original DMA bank and ARM input index, avoiding a second global scan. */
+static int frf_r135_restore_composite(uint32_t port,uint32_t cfg,
+                                      uint32_t vid,uint32_t pid,
+                                      uint32_t found,uint32_t parent_slot)
+{
+    struct R121HIDIf *selected[R121_HID_IF_MAX];
+    uint32_t indices[R121_HID_IF_MAX],epochs[R121_HID_IF_MAX];
+    struct XHCIRing rings[R121_HID_IF_MAX];
+    uint32_t count=0u,flags=1u,maxdci=1u;
+    if(found>R121_HID_IF_MAX || r121_boot_hid_count()<found)return 0;
+    for(uint32_t idx=0u;idx<g_native_count;idx++) {
+        struct NativeHID *h=&g_native_hid[idx];
+        if(h->hub_port!=port || h->parent_hub_slot!=parent_slot)continue;
+        if(count>=found || h->slot || h->vid!=vid || h->pid!=pid ||
+           (h->protocol!=USB_HID_PROTOCOL_MOUSE &&
+            h->protocol!=USB_HID_PROTOCOL_KEYBOARD))return 0;
+        struct R121HIDIf *iface=NULL;
+        for(uint32_t j=0u;j<g_r121_hid_if_count;j++)
+            if(g_r121_hid_if[j].iface==h->interface &&
+               g_r121_hid_if[j].protocol==h->protocol &&
+               g_r121_hid_if[j].ep==h->ep &&
+               g_r121_hid_if[j].mps) {
+                iface=&g_r121_hid_if[j];break;
+            }
+        if(!iface || (h->report_desc_length &&
+           iface->report_length!=h->report_desc_length))return 0;
+        uint32_t dci=iface->ep*2u+1u;
+        if(dci>31u || (flags&(1u<<dci)))return 0;
+        indices[count]=idx;selected[count]=iface;
+        epochs[count]=h->ring_epoch^1u;
+        flags|=1u<<dci;
+        if(dci>maxdci)maxdci=dci;
+        ++count;
+    }
+    if(count!=found)return 0;
+    host_zero(g_input_context,sizeof(g_input_context));
+    context_write32(input_ctx(0u),1u,flags);
+    fill_slot_context(maxdci);
+    for(uint32_t n=0u;n<count;n++) {
+        struct NativeHID *h=&g_native_hid[indices[n]];
+        struct R121HIDIf *i=selected[n];
+        uint32_t interval=i->interval?i->interval:1u,xint=0u;
+        if(g_port_speed>=3u) {
+            if(interval>16u)interval=16u;
+            xint=interval-1u;
+        } else {
+            uint32_t uf=interval*8u;
+            while(uf>1u){++xint;uf>>=1u;}
+            if(xint<3u)xint=3u;
+            if(xint>10u)xint=10u;
+        }
+        ring_init(&rings[n],
+                  &g_hid_in_trbs[h->ring_bank]
+                     [epochs[n]*(XHCI_RING_TRBS*2u)],XHCI_RING_TRBS);
+        fill_ep_context(i->ep*2u+1u,&rings[n],7u,i->mps,xint);
+    }
+    host_cache_clean(g_input_context,sizeof(g_input_context));
+    if(!command_submit(XHCI_CMD_CONFIG_EP,host_dma(g_input_context),
+                       g_slot_id<<24,1500u,NULL))return 0;
+    if(!frf_xhci_host_control(0u,USB_REQ_SET_CONFIGURATION,
+                   (uint16_t)cfg,0u,NULL,0u,0,NULL))return 0;
+    for(uint32_t n=0u;n<count;n++)
+        (void)frf_xhci_host_control(0x21u,USB_REQ_SET_PROTOCOL,0u,
+                   (uint16_t)selected[n]->iface,NULL,0u,0,NULL);
+    for(uint32_t n=0u;n<count;n++) {
+        struct NativeHID *h=&g_native_hid[indices[n]];
+        h->slot=g_slot_id;
+        h->mps=selected[n]->mps;
+        h->dci=selected[n]->ep*2u+1u;
+        h->ring=rings[n];h->ep0=g_ep0_ring;
+        h->ring_epoch=epochs[n];
+        h->pending=h->pending_length=0u;
+        h->failures=h->recover_count=0u;
+        h->recover_pending=h->recover_stop=0u;
+        h->retry_after_cnt=h->pending_since_cnt=0u;
+        h->idle_noted=0u;
+        h->valid=1u;
+        frf_r92_recovery_state[indices[n]]=0u;
+        frf_r88_hid_last_cnt[indices[n]]=0u;
+        if(h->protocol==USB_HID_PROTOCOL_MOUSE) {
+            extern volatile uint8_t frf_usb_mouse_present;
+            __atomic_store_n(&frf_usb_mouse_present,1u,__ATOMIC_RELEASE);
+        }
+    }
+    return 1;
+}
+
+static void frf_r135_hotplug_service(void)
+{
+    if(!g_root_hub_slot || !g_hub_num_ports)return;
+    uint64_t now=host_counter(),hz=host_counter_hz();
+    if(!hz)hz=54000000u;
+#if defined(FRF_PI4_NATIVE_HOTPLUG_EXTERNAL)
+    uint32_t max_parent=g_r97_hub_used;
+#else
+    uint32_t max_parent=0u;
+#endif
+    for(uint32_t parent=0u;parent<=max_parent;parent++) {
+        struct R97HubState *hub=parent?&g_r97_external[parent-1u]:NULL;
+        if(hub && !hub->live)continue;
+        uint32_t parent_slot=hub?hub->slot:0u;
+        uint32_t port_count=hub?hub->ports:g_hub_num_ports;
+        volatile uint32_t *pending_mask=&frf_r135_hid_pending_mask;
+        uint32_t attached_mask=frf_r134_hub_attached_mask;
+#if defined(FRF_PI4_NATIVE_HOTPLUG_EXTERNAL)
+        if(hub) {
+            pending_mask=&frf_r136_external_pending[parent-1u];
+            attached_mask=frf_r136_external_attached[parent-1u];
+        }
+#endif
+        uint32_t pending=*pending_mask;
+        if(!pending)continue;
+    for(uint32_t port=1u;port<=port_count && port<16u;port++) {
+        uint32_t bit=1u<<port;
+        if(!(pending&bit))continue;
+        if(g_r135_hid_retry[parent][port]>=5u)continue;
+        if(g_r135_hid_next_retry[parent][port] && now<g_r135_hid_next_retry[parent][port])continue;
+        frf_r135_hid_last_port=port;
+        uint32_t index=FRF_NATIVE_HID_MAX,found=0u;
+        for(uint32_t i=0u;i<g_native_count;i++) {
+            if(g_native_hid[i].hub_port==port &&
+               g_native_hid[i].parent_hub_slot==parent_slot)
+                { index=i; ++found; }
+        }
+        /* Never hotplug a composite receiver, attached storage, or a hub
+         * until their parent+interface lifecycle is supported atomically. */
+        uint32_t protected_port=0u;
+        for(uint32_t d=0u;d<g_hub_device_count;d++)
+            if(index<FRF_NATIVE_HID_MAX &&
+               g_hub_devices[d].slot_id==g_native_hid[index].slot &&
+               (g_hub_devices[d].mass_storage || g_hub_devices[d].is_hub))
+                protected_port=1u;
+        if(!found || found>R121_HID_IF_MAX || protected_port) {
+            *pending_mask&=~bit;
+            continue;
+        }
+        struct NativeHID *h=&g_native_hid[index];
+        uint32_t retired_slot=h->slot;
+        uint32_t mixed_slots=0u;
+        for(uint32_t i=0u;i<g_native_count;i++)
+            if(g_native_hid[i].hub_port==port &&
+               g_native_hid[i].parent_hub_slot==parent_slot &&
+               g_native_hid[i].slot!=h->slot)mixed_slots=1u;
+        if(mixed_slots) {
+            ++frf_r135_hid_failed;
+            *pending_mask&=~bit;
+            continue;
+        }
+        /* Disable Slot ends ownership of all outstanding TDs belonging to
+         * the old physical device. Until successful completion, do not
+         * repurpose its DCBAA entry or DMA ring memory. */
+        if(h->slot) {
+            uint32_t old_slot=h->slot;
+            for(uint32_t i=0u;i<g_native_count;i++) {
+                struct NativeHID *item=&g_native_hid[i];
+                if(item->hub_port!=port ||
+                   item->parent_hub_slot!=parent_slot)continue;
+                if(item->valid) {
+                    /* Only physical link change, never an idle NAK. */
+                    if(item->protocol==USB_HID_PROTOCOL_MOUSE) {
+                        extern volatile uint8_t frf_usb_mouse_present;
+                        extern volatile uint8_t frf_usb_mouse_buttons;
+                        const uint8_t release[3]={0u,0u,0u};
+                        frf_native_usb_mouse_report(release,3u);
+                        __atomic_store_n(&frf_usb_mouse_buttons,0u,__ATOMIC_RELEASE);
+                        __atomic_store_n(&frf_usb_mouse_present,0u,__ATOMIC_RELEASE);
+                    } else if(item->protocol==USB_HID_PROTOCOL_KEYBOARD) {
+                        const uint8_t release[8]={0u};
+                        frf_native_usb_keyboard_report(release);
+                    } else if(item->protocol==0u) {
+                        /* Pad state is currently global: never release
+                         * another independent receiver's held buttons. */
+                        uint32_t peers=0u;
+                        for(uint32_t j=0u;j<g_native_count;j++)
+                            if(g_native_hid[j].valid &&
+                               (g_native_hid[j].hub_port!=port ||
+                                g_native_hid[j].parent_hub_slot!=parent_slot) &&
+                               g_native_hid[j].protocol==0u)++peers;
+                        if(!peers)frf_native_usb_pad_release();
+                    }
+                }
+                item->valid=0u;item->pending=0u;
+                item->pending_since_cnt=0u;
+                item->recover_pending=0u;
+                item->idle_noted=0u;
+            }
+            frf_r135_hid_last_stage=2u;
+            if(!command_submit(XHCI_CMD_DISABLE_SLOT,0u,
+                              old_slot<<24,1000u,NULL)) {
+                frf_r135_hid_last_stage=0xe2u;
+                ++frf_r135_hid_failed;
+                ++g_r135_hid_retry[parent][port];
+                g_r135_hid_next_retry[parent][port]=now+hz;
+                break;
+            }
+            for(uint32_t i=0u;i<g_native_count;i++)
+                if(g_native_hid[i].hub_port==port &&
+                   g_native_hid[i].parent_hub_slot==parent_slot)
+                    g_native_hid[i].slot=0u;
+            g_dcbaa[old_slot]=0u;
+            host_cache_clean(&g_dcbaa[old_slot],sizeof(g_dcbaa[old_slot]));
+            ++frf_r135_hid_disconnected;
+            frf_r130_post_hid_discovered();
+            kprintf("[R135-HID] port%u old slot%u disabled (%u interfaces)\n",
+                    port,old_slot,found);
+        }
+        if(!(attached_mask&bit)) {
+            /* Wait for next C_PORT_CONNECTION or attached-state transition.
+             * A removed mouse is not an idle/stalled HID endpoint. */
+            *pending_mask&=~bit;
+            break;
+        }
+
+        /* Preserve all global EP0/port state used by other child devices.
+         * Reset/address targets ONLY this hub downstream port. */
+        const uint32_t old_bank=g_native_bank,old_slot=g_slot_id,
+              old_speed=g_port_speed,old_mps=g_ep0_mps,
+              old_route=g_route_string,old_root=g_root_hub_port,
+              old_hub=g_slot_hub,old_nports=g_slot_num_ports,
+              old_tt_slot=g_tt_hub_slot,old_tt_port=g_tt_port,
+              old_tt_think=g_tt_think_time,old_epoch=g_r135_new_ring_epoch;
+        const struct XHCIRing old_ep0=g_ep0_ring;
+        const uint32_t epoch=h->ring_epoch^1u;
+        g_native_bank=h->ring_bank;
+        g_r135_new_ring_epoch=epoch;
+        if(hub)r97_select_hub(hub);
+        else {
+            g_slot_id=g_root_hub_slot;
+            g_port_speed=g_root_hub_speed;
+            g_ep0_mps=g_r99_root_ep0_mps;
+            g_ep0_ring=g_r99_root_ep0_ring;
+            g_route_string=0u;g_root_hub_port=g_selected_root_port;
+            g_slot_hub=1u;g_slot_num_ports=g_hub_num_ports;
+            g_tt_hub_slot=g_tt_port=g_tt_think_time=0u;
+        }
+        uint32_t speed=0u,configured=0u,addressed=0u;
+        frf_r135_hid_last_stage=3u;
+        int reset_ok=hub_reset_downstream_port(port,&speed);
+        /* A failed EP0 request still consumes software TRBs. Keep the
+         * root-hub control ring synchronized even when reset fails. */
+        if(hub)hub->ep0=g_ep0_ring;
+        else g_r99_root_ep0_ring=g_ep0_ring;
+        if(reset_ok && speed) {
+            frf_r135_hid_last_stage=4u;
+            if(address_child_device(port,speed,
+                                    hub?hub->slot:g_root_hub_slot,
+                                    hub?hub->speed:g_root_hub_speed,
+                                    hub?hub->tt_think:g_hub_tt_think_time,
+                                    hub?hub->route:0u,
+                                    hub?hub->depth:0u)) {
+                addressed=1u;
+                struct FRFXHCIHubDeviceInfo d;
+                frf_zero_bytes(&d,sizeof(d));
+                d.hub_port=port;
+                d.speed_id=speed;
+                d.slot_id=g_slot_id;
+                uint32_t ie=0u,oe=0u,im=0u,om=0u,cfg=0u;
+                uint32_t he=0u,hm=0u,hi=0u,iface=0xffffffffu;
+                frf_r135_hid_last_stage=5u;
+                int parsed=hub_parse_child(&d,&ie,&oe,&im,&om,&cfg,
+                                   &he,&hm,&hi,&iface);
+                if(parsed && !d.mass_storage && !d.is_hub &&
+                   d.vid==h->vid && d.pid==h->pid &&
+                   found>1u) {
+                    frf_r135_hid_last_stage=6u;
+                    if(frf_r135_restore_composite(port,cfg,d.vid,d.pid,
+                                                    found,parent_slot))
+                        configured=1u;
+                } else if(parsed && found==1u &&
+                   !d.mass_storage && !d.is_hub &&
+                   d.vid==h->vid && d.pid==h->pid &&
+                   d.interface_class==USB_CLASS_HID &&
+                   d.interface_protocol==h->protocol &&
+                   iface==h->interface && he && hm &&
+                   r121_boot_hid_count()<2u) {
+                    frf_r135_hid_last_stage=6u;
+                    if(configure_interrupt_in(he,hm,hi) &&
+                       frf_xhci_host_control(0u,USB_REQ_SET_CONFIGURATION,
+                          (uint16_t)cfg,0u,NULL,0u,0,NULL)) {
+                        if(h->protocol==USB_HID_PROTOCOL_KEYBOARD ||
+                           h->protocol==USB_HID_PROTOCOL_MOUSE)
+                            (void)frf_xhci_host_control(0x21u,
+                                USB_REQ_SET_PROTOCOL,0u,(uint16_t)iface,
+                                NULL,0u,0,NULL);
+                        /* Stable index lets frf_xhci_hid.c keep its
+                         * descriptor-based report ID / pad decoder. */
+                        h->slot=g_slot_id;
+                        h->dci=g_hid_in_dci;
+                        h->ep=he;h->mps=hm;
+                        h->report_desc_length=g_r91_last_report_descriptor_length;
+                        h->ring=g_hid_in_ring;h->ep0=g_ep0_ring;
+                        h->ring_epoch=epoch;
+                        h->out_ep=g_r96_hid_out_ep;
+                        h->out_dci=g_hid_out_dci;
+                        h->out_mps=g_r96_hid_out_mps;
+                        if(g_hid_out_dci)h->out_ring=g_hid_out_ring;
+                        h->pending=h->pending_length=0u;
+                        h->failures=h->recover_count=0u;
+                        h->recover_pending=h->recover_stop=0u;
+                        h->retry_after_cnt=h->pending_since_cnt=0u;
+                        h->idle_noted=0u;
+                        h->valid=1u;
+                        if(h->protocol==USB_HID_PROTOCOL_MOUSE) {
+                            extern volatile uint8_t frf_usb_mouse_present;
+                            __atomic_store_n(&frf_usb_mouse_present,1u,__ATOMIC_RELEASE);
+                        }
+                        frf_r92_recovery_state[index]=0u;
+                        frf_r88_hid_last_cnt[index]=0u;
+                        configured=1u;
+                    }
+                } else {
+                    kprintf("[R135-HID] port%u changed descriptor or unsupported composite\n",port);
+                }
+            }
+        }
+        if(addressed && !configured)hub_disable_current_child();
+        if(configured) {
+            frf_r135_hid_last_stage=7u;
+            *pending_mask&=~bit;
+            if(hub) {
+                frf_r97_ext_live_mask|=bit;
+            } else {
+                frf_r94_usb_pending_mask&=~bit;
+                frf_r89_native_live_mask|=bit;
+                frf_r94_usb_live_mask|=bit;
+            }
+            ++frf_r135_hid_reconnected;
+            g_r135_hid_retry[parent][port]=0u;
+            frf_r130_post_hid_discovered();
+            kprintf("[R135-HID] port%u slot%u %u HID interface(s) restored\n",
+                    port,g_slot_id,found);
+        }
+        if(!configured) {
+            ++frf_r135_hid_failed;
+            ++g_r135_hid_retry[parent][port];
+            frf_r135_hid_last_stage=0xe0u | (frf_r135_hid_last_stage&15u);
+            g_r135_hid_next_retry[parent][port]=host_counter()+hz;
+            kprintf("[R136-HID] parent%u port%u re-enum failed attempt%u stage=%02x\n",
+                    parent,port,g_r135_hid_retry[parent][port],frf_r135_hid_last_stage);
+        }
+        /* Ring for root control transfers may have advanced during reset.
+         * Only the selected child endpoint is rebuilt; MSC and peer
+         * HID descriptor/ring states remain exactly as they were. */
+        if(old_slot==(hub?hub->slot:g_root_hub_slot) ||
+           (retired_slot && old_slot==retired_slot)) {
+            /* Old selected slot was the hub or the disconnected device:
+             * do not restore a stale EP0 pointer / disabled slot. */
+            if(hub)r97_select_hub(hub);
+            else {
+                g_slot_id=g_root_hub_slot;
+                g_port_speed=g_root_hub_speed;
+                g_ep0_mps=g_r99_root_ep0_mps;
+                g_ep0_ring=g_r99_root_ep0_ring;
+                g_route_string=0u;g_root_hub_port=g_selected_root_port;
+                g_slot_hub=1u;g_slot_num_ports=g_hub_num_ports;
+                g_tt_hub_slot=g_tt_port=g_tt_think_time=0u;
+            }
+        } else {
+            g_slot_id=old_slot;g_port_speed=old_speed;g_ep0_mps=old_mps;
+            g_ep0_ring=old_ep0;
+            g_route_string=old_route;g_root_hub_port=old_root;
+            g_slot_hub=old_hub;g_slot_num_ports=old_nports;
+            g_tt_hub_slot=old_tt_slot;g_tt_port=old_tt_port;
+            g_tt_think_time=old_tt_think;
+        }
+        g_native_bank=old_bank;
+        g_r135_new_ring_epoch=old_epoch;
+        break; /* one physical port per parent service round */
+    }
+    }
+}
+#endif /* FRF_PI4_NATIVE_HOTPLUG_REENUM */
 
 /* Every USB2.0 socket on Pi4B is behind the VL805 internal 4-port hub.
  * Unlike the root hub, downstream status needs a class GET_STATUS control TD. */
@@ -3435,6 +3583,14 @@ static int hub_scan_children(void)
     frf_zero_bytes(g_r135_hid_next_retry,sizeof(g_r135_hid_next_retry));
     g_r135_new_ring_epoch=0u;
     g_r134_hub_snapshot_valid=0u;
+#if defined(FRF_PI4_NATIVE_HOTPLUG_EXTERNAL)
+    frf_zero_bytes((void*)frf_r136_external_attached,sizeof(frf_r136_external_attached));
+    frf_zero_bytes((void*)frf_r136_external_pending,sizeof(frf_r136_external_pending));
+    frf_zero_bytes((void*)frf_r136_external_fail,sizeof(frf_r136_external_fail));
+    frf_zero_bytes((void*)frf_r136_external_events,sizeof(frf_r136_external_events));
+    frf_zero_bytes(g_r136_external_known,sizeof(g_r136_external_known));
+    g_r136_external_next_poll=0u;
+#endif
     frf_r98_root_power_cycles=frf_r98_root_hs_recovery_ms=0u;
     for(unsigned z=0u;z<4u;z++) {
         frf_r98_root_addr_cc[z]=frf_r98_root_enable_cc[z]=0u;
@@ -3888,7 +4044,7 @@ static int hub_scan_children(void)
         }
 #endif
         if(r121_boot_hid_count()>=2u &&
-           r121_configure_composite(cfg,d->vid,d->pid,port)) {
+           r121_configure_composite(cfg,d->vid,d->pid,port,0u)) {
             frf_r89_native_candidate_mask|=1u<<port;
             if(port<=4u) {
                 frf_r89_native_live_mask|=1u<<port;
@@ -3940,7 +4096,7 @@ static int hub_scan_children(void)
                 if(g_hid_out_dci)h->out_ring=g_hid_out_ring;
                 h->ring=g_hid_in_ring;h->ep0=g_ep0_ring;
                 h->ring_bank=g_native_bank;h->ring_epoch=0u;
-                h->hub_port=port;
+                h->hub_port=port;h->parent_hub_slot=0u;
                 h->pending=0u;h->pending_length=0u;h->failures=0u;h->valid=1u;
                 ++g_native_count;
                 ++g_r97_next_bank; /* this DMA context is permanently live */
