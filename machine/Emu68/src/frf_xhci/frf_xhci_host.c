@@ -410,7 +410,15 @@ volatile uint32_t frf_r99_hid_active_pending;
 static struct XHCIRing g_r99_root_ep0_ring;
 static uint32_t g_r99_root_ep0_mps,g_r99_root_valid;
 static uint64_t g_r99_root_next_check;
-#ifndef FRF_RELEASE_QUIET
+/* R134: CPU1-owned downstream-port snapshots, independent of the guest.
+ * Observe all hub ports, not just the single R99 diagnostic port.
+ * These counters intentionally do NOT initiate destructive re-enumeration. */
+volatile uint32_t frf_r134_hub_attached_mask,frf_r134_hub_enabled_mask;
+volatile uint32_t frf_r134_hub_changed_mask,frf_r134_hub_poll_fail;
+volatile uint32_t frf_r134_hub_connect_events,frf_r134_hub_disconnect_events;
+static uint32_t g_r134_hub_snapshot_valid;
+
+#if defined(FRF_PI4_NATIVE_HOTPLUG_PROBE)
 static void frf_r99_monitor_root_port(void);
 #endif
 
@@ -1822,8 +1830,8 @@ int frf_xhci_host_native_poll_any(void *dst,uint32_t capacity,
     /* A non-destructive hub class GET_STATUS samples actual hub-link
        state while HID endpoints are running. Synchronous completion
        helper retains unrelated xHCI Transfer Events for later dispatch. */
-#ifndef FRF_RELEASE_QUIET
-    frf_r99_monitor_root_port(); /* diagnostics only, NOT needed for HID */
+#if defined(FRF_PI4_NATIVE_HOTPLUG_PROBE)
+    frf_r99_monitor_root_port(); /* R134 CPU1 live link monitoring */
 #endif
     uint32_t pending_count=0u,latest_age=0u;
     for(uint32_t i=0;i<g_native_count;i++) {
@@ -2192,11 +2200,10 @@ static int hub_port_status(uint32_t port, uint16_t *status, uint16_t *change)
  * Save and restore CPU1's currently selected global EP0 context. A
  * port-status request is a *control* TD; unrelated HID transfer events
  * are deferred by the existing event_wait_transfer_trb() path. */
-#ifndef FRF_RELEASE_QUIET
+#if defined(FRF_PI4_NATIVE_HOTPLUG_PROBE)
 static void frf_r99_monitor_root_port(void)
 {
-    if(!g_r99_root_valid || !frf_r99_root_monitor_port ||
-       !g_root_hub_slot)return;
+    if(!g_root_hub_slot || !g_hub_num_ports)return;
     uint64_t hz=host_counter_hz();
     if(!hz)hz=54000000u;
     uint64_t now=host_counter();
@@ -2211,7 +2218,38 @@ static void frf_r99_monitor_root_port(void)
     g_ep0_mps=g_r99_root_ep0_mps;
     g_ep0_ring=g_r99_root_ep0_ring;
     uint16_t st=0u,ch=0u;
-    int ok=hub_port_status(frf_r99_root_monitor_port,&st,&ch);
+    int ok=0;
+    uint32_t attached=0u,enabled=0u,changed=0u,fail=0u;
+    uint32_t limit=g_hub_num_ports<15u?g_hub_num_ports:15u;
+    for(uint32_t port=1u;port<=limit;port++) {
+        st=ch=0u;
+        if(!hub_port_status(port,&st,&ch)) { ++fail;continue; }
+        if(st&USB_HUB_PORT_CONNECTION)attached|=1u<<port;
+        if(st&USB_HUB_PORT_ENABLE)enabled|=1u<<port;
+        if(ch)changed|=1u<<port;
+        if(port==frf_r99_root_monitor_port)ok=1;
+    }
+    frf_r134_hub_changed_mask=changed;
+    frf_r134_hub_poll_fail+=fail;
+    if(!fail) {
+        if(g_r134_hub_snapshot_valid) {
+            uint32_t arrivals=attached&~frf_r134_hub_attached_mask;
+            uint32_t removals=frf_r134_hub_attached_mask&~attached;
+            if(arrivals || removals) {
+                frf_r134_hub_connect_events+=__builtin_popcount(arrivals);
+                frf_r134_hub_disconnect_events+=__builtin_popcount(removals);
+                frf_r94_hotplug_connects+=__builtin_popcount(arrivals);
+                frf_r94_hotplug_disconnects+=__builtin_popcount(removals);
+                frf_r94_usb_pending_mask|=arrivals;
+                frf_r94_hotplug_stage=removals?1u:2u;
+                kprintf("[R134-HID] ARM hub change attach=%08x remove=%08x pending=%08x\\n",
+                        arrivals,removals,frf_r94_usb_pending_mask);
+            }
+        }
+        frf_r134_hub_attached_mask=attached;
+        frf_r134_hub_enabled_mask=enabled;
+        g_r134_hub_snapshot_valid=1u;
+    }
     g_r99_root_ep0_ring=g_ep0_ring;
     g_slot_id=saved_slot;
     g_port_speed=saved_speed;
