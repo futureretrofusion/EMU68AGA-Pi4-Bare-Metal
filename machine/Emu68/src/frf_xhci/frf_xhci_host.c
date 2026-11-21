@@ -2219,6 +2219,7 @@ static void frf_r99_monitor_root_port(void)
     g_ep0_ring=g_r99_root_ep0_ring;
     uint16_t st=0u,ch=0u;
     int ok=0;
+    uint16_t selected_status=0u,selected_change=0u;
     uint32_t attached=0u,enabled=0u,changed=0u,fail=0u;
     uint32_t limit=g_hub_num_ports<15u?g_hub_num_ports:15u;
     for(uint32_t port=1u;port<=limit;port++) {
@@ -2227,7 +2228,11 @@ static void frf_r99_monitor_root_port(void)
         if(st&USB_HUB_PORT_CONNECTION)attached|=1u<<port;
         if(st&USB_HUB_PORT_ENABLE)enabled|=1u<<port;
         if(ch)changed|=1u<<port;
-        if(port==frf_r99_root_monitor_port)ok=1;
+        if(port==frf_r99_root_monitor_port) {
+            ok=1;
+            selected_status=st;
+            selected_change=ch;
+        }
     }
     frf_r134_hub_changed_mask=changed;
     frf_r134_hub_poll_fail+=fail;
@@ -2258,6 +2263,8 @@ static void frf_r99_monitor_root_port(void)
     if(ok) {
         ++frf_r99_root_poll_ok;
         uint32_t before=frf_r99_live_link;
+        st=selected_status;
+        ch=selected_change;
         frf_r99_root_status=st;
         frf_r99_root_change=ch;
         frf_r99_live_link=
