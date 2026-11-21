@@ -412,6 +412,7 @@ option(FRF_PI4_USB_MASS_RO "Pi4 xHCI boot-present read-only MSC + Z2 usbmass.dev
 option(FRF_PI4_USB_MASS_RW "Pi4 staged WRITE10 test; requires matching usbmass.device v0.5" OFF)
 option(FRF_PI4_USB_MASS_MULTI "R133 multi-slot and multi-LUN USB BOT; read-only secondary AmigaOS units" OFF)
 option(FRF_PI4_NATIVE_HOTPLUG_PROBE "R134 CPU1 hub-link monitoring, no reset or re-enumeration yet" OFF)
+option(FRF_PI4_NATIVE_HOTPLUG_REENUM "R135 ARM-only selective single-HID slot rebuild after USB reconnect" OFF)
 if(FRF_PI4_USB_MASS_MULTI AND NOT FRF_PI4_USB_MASS_RO)
     message(FATAL_ERROR "R133 multi-MSC requires Pi4 USB mass transport")
 endif()
@@ -434,15 +435,19 @@ if(FRF_PI4_XHCI_HID)
         ${CMAKE_SOURCE_DIR}/src/frf_xhci/frf_native_usb_input.c
         ${CMAKE_SOURCE_DIR}/src/frf_xhci/frf_native_usb_pad.c
         ${CMAKE_SOURCE_DIR}/src/frf_timebase.c)
+    # ARM-native HID hotplug is independent of USB storage / R133 MSC.
+    if(FRF_PI4_NATIVE_HOTPLUG_REENUM)
+        target_compile_definitions(Emu68.elf PRIVATE
+            FRF_PI4_NATIVE_HOTPLUG_PROBE=1 FRF_PI4_NATIVE_HOTPLUG_REENUM=1)
+    elseif(FRF_PI4_NATIVE_HOTPLUG_PROBE)
+        target_compile_definitions(Emu68.elf PRIVATE FRF_PI4_NATIVE_HOTPLUG_PROBE=1)
+    endif()
     if(FRF_PI4_USB_MASS_RO)
         target_sources(Emu68.elf PRIVATE
             ${CMAKE_SOURCE_DIR}/src/frf_usb/frf_usb_mass_board.c)
         if(FRF_PI4_USB_MASS_MULTI)
             target_sources(Emu68.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/frf_xhci/frf_pi4_usb_mass_multi.c)
             target_compile_definitions(Emu68.elf PRIVATE FRF_PI4_USB_MASS_MULTI=1)
-            if(FRF_PI4_NATIVE_HOTPLUG_PROBE)
-                target_compile_definitions(Emu68.elf PRIVATE FRF_PI4_NATIVE_HOTPLUG_PROBE=1)
-            endif()
         else()
             target_sources(Emu68.elf PRIVATE ${CMAKE_SOURCE_DIR}/src/frf_xhci/frf_pi4_usb_mass.c)
         endif()
