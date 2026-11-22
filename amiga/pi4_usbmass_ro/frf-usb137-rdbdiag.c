@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "frf_usb_mass.h"
+#include "frf_r138_unit_map.h"
 
 static unsigned char first16[FRF_UM_MAX_SECTORS*512u] __attribute__((aligned(16)));
 static void show_mapping(void){
@@ -25,6 +26,8 @@ static void show_mapping(void){
         if(e->magic==FRF_UM_EXT_MAGIC && e->version==FRF_UM_EXT_VERSION &&
            e->count<=FRF_UM_MAX_UNITS){
             printf("FRUM R133 v2: %lu logical units\n",(unsigned long)e->count);
+            printf(" R138 if v0.7 driver: CaffeineOS guest unit0 routes to physical unit%u\n",
+                   frf_r138_physical_unit(e,0u));
             for(unsigned i=0;i<e->count;i++){
                 const volatile struct frf_um_ext_unit *u=&e->units[i];
                 printf(" unit%u slot%lu LUN%lu present=%lu sectors=%lu flags=%08lx\n",
@@ -133,7 +136,7 @@ static void r137_inspect(struct IOStdReq *io,unsigned unit,
 }
 
 int main(void){
-    puts("FRF R133 multi-USB / Amiga RDB probe -- READ ONLY");
+    puts("FRF R138 multi-USB / RDB/PFS3 diagnostic -- READ ONLY");
     show_mapping();
     struct MsgPort *port=CreateMsgPort();
     if(!port){puts("Unable to create message port");return 20;}

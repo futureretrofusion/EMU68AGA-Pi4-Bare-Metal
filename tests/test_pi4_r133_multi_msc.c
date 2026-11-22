@@ -99,6 +99,11 @@ int main(void){
        (volatile struct frf_um_extension*)(board+FRF_UM_EXT_OFFSET);
     must(e->magic==FRF_UM_EXT_MAGIC&&e->version==2u,"FRUM additive v2");
     must(e->count==3u,"3 logical units (two physical hosts)");
+    /* R138 boot-only eager detection: secondary LUN1 RDB should
+     * be known BEFORE CaffeineOS can execute its USBR0..USBR4 mounts. */
+    must(e->units[1].capacity==32768u &&
+         (e->units[1].flags&FRF_UM_UNIT_RDB)!=0u,
+         "R138 boot exposes LUN1 RDB before Amiga mount startup");
     must(e->units[0].capacity==16384u&&e->units[0].slot==5u&&
          e->units[0].lun==0u,"unit0 FAT disk");
     must(e->units[2].capacity==8192u&&e->units[2].slot==9u,

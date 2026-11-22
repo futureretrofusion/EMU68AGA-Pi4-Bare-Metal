@@ -174,10 +174,16 @@ void frf_pi4_um_reset(void){
 }
 void frf_pi4_um_probe_inline(void){ discover_hosts(); }
 void frf_pi4_um_init(void){
-    /* Never wipe devices that were already probed inline during cold
-     * enumeration. Host scan owns the lifetime of the array. */
+    /* Preserve host enumeration, but probe every advertised USB LUN
+     * once before telling the Amiga that USB enumeration is ready.
+     * R133 did not probe card-reader LUN1 until later CPU1 polling,
+     * potentially after CaffeineOS started PFS3 startup. Read-only
+     * CAPACITY/RDSK probing; deferred retries remain unchanged. */
     discover_hosts();
-    kprintf("[R133-MSC] init physicalHosts=%u logicalUnits=%u ready=%u\n",
+    for(uint32_t i=0u;i<used_units;i++)
+        if(!units[i].dead && !units[i].cap && !units[i].attempts)
+            try_capacity(i);
+    kprintf("[R138-MSC] init physicalHosts=%u logicalUnits=%u ready=%u\n",
             frf_xhci_host_msc_count(),used_units,ready_units);
 }
 void frf_pi4_um_retry(uint64_t now,uint64_t hz){
