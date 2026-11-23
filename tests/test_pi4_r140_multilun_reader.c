@@ -1,4 +1,4 @@
-/* R140 host-executed test: empty reader LUN0 + populated RDB LUN1. */
+/* R140 host-executed test: empty reader LUN0 + populated RDB LUN1.
  * Simulates physical slots 5 and 9, with host0: LUN0 FAT32, LUN1 RDB;
  * host1: LUN0 FAT32. Tests separate-unit routing and write confinement. */
 #include <stdint.h>
