@@ -125,6 +125,22 @@ static void try_capacity(uint32_t i){
     struct R133Unit *u=&units[i];
     if(u->cap||u->dead||u->attempts>=12u)return;
     ++u->attempts;
+    /* R140: card-reader LUN0 may contain no media. Issue a zero-data
+     * TEST UNIT READY first. A failed READ CAPACITY has an 8-byte data
+     * stage that some readers STALL or short-complete, which the old
+     * BOT path treats as a fatal transport error for ALL reader LUNs.
+     * TUR CHECK CONDITION is safe: its CSW is consumed, then continue
+     * probing populated LUN1..N. Never write any USB sectors here. */
+    uint8_t tur[6]={0x00u,0u,0u,0u,0u,0u};
+    if(!bot(i,tur,6u,0,0u,1)){
+        if(!u->reported_failure){
+            kprintf("[R140-MSC] unit%u slot%u LUN%u not ready TUR/BOT=%u dead=%u\n",
+                i,frf_xhci_host_msc_slot_at(u->host),u->lun,
+                u->bot_error,u->dead);
+            u->reported_failure=1u;
+        }
+        return;
+    }
     uint8_t cdb[10]={0x25u,0u,0u,0u,0u,0u,0u,0u,0u,0u};
     if(!bot(i,cdb,10u,payload,8u,1)){
         if(!u->reported_failure){
