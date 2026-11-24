@@ -6,6 +6,14 @@
 #include <stdint.h>
 void frf_native_usb_keyboard_report(const uint8_t report[8]);
 void frf_native_usb_mouse_report(const uint8_t *report, unsigned len);
+/* R144: report-mode mouse descriptor decoder. Returns zero for unsupported
+   layouts; caller must leave the device in boot protocol in that case.
+   Decoded report is four bytes: buttons, signed dx, signed dy, signed wheel. */
+int frf_native_usb_mouse_set_descriptor_for(unsigned index,const uint8_t *desc,unsigned len);
+int frf_native_usb_mouse_decode_for(unsigned index,const uint8_t *bytes,unsigned len,
+                                    uint8_t normalized[4]);
+extern volatile uint32_t frf_r144_wheel_up,frf_r144_wheel_down;
+extern volatile uint32_t frf_r144_wheel_last,frf_r144_wheel_reports;
 void frf_native_usb_pad_update(int x, int y, unsigned buttons, int hat);
 void frf_native_usb_pad_release(void);
 /* Pi3-compatible axes 2/3 + port2 POTGOR extra fire buttons. */

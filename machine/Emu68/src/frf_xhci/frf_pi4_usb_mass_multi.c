@@ -21,6 +21,9 @@ static struct R133Unit units[UMAX];
 static uint32_t used_units,registered_hosts,ready_units,bot_tag=0x52313300u;
 static uint64_t next_global_retry;
 static uint32_t retry_cursor;
+/* Diagnostic logging bounded so repeating PFS3 error reads cannot
+ * flood the Pi4 CPU1 console or interfere with native HID timing. */
+static uint32_t r141_read_fail_reports;
 static uint8_t cbw[64] __attribute__((aligned(64)));
 static uint8_t csw[64] __attribute__((aligned(64)));
 static uint8_t payload[FRF_UM_MAX_SECTORS*FRF_UM_SECTOR_SIZE] __attribute__((aligned(64)));
@@ -114,10 +117,25 @@ static void detect_rdb(uint32_t i){
         }
     }
 #if defined(FRF_PI4_USB_MASS_RW)
-    /* v0.5-compatible USB0 write path, never make an RDB target writable.
-     * Units 1..7 are unconditionally RO until individual media validation. */
+    /* R142: explicit, opt-in experimental RDB writes. No implicit
+     * change to the normal read-only R141 release. A unit may be
+     * write-enabled only after its own RDB was read successfully and
+     * matched an RDSK signature, and capacity is known. Never allow
+     * writes to other logical units or an unscanned reader slot.
+     * The existing guest v0.8 checks this per-unit flag before every
+     * TD32/TD64/SCSI WRITE request. */
+#if defined(FRF_PI4_RDB_WRITE_EXPERIMENTAL)
+    if((u->flags&FRF_UM_UNIT_RDB) && u->scan_done &&
+       u->cap>16u && !u->dead){
+        u->flags|=FRF_UM_UNIT_WRITE;
+        kprintf("[R142-MSC] EXPERIMENTAL RDB RW physical unit%u host%u LUN%u capacity%u\\n",
+                i,u->host,u->lun,u->cap);
+    }
+#else
+    /* Preserve historical v0.5 FAT32 unit0 write support only. */
     if(i==0u && !(u->flags&FRF_UM_UNIT_RDB))
         u->flags|=FRF_UM_UNIT_WRITE;
+#endif
 #endif
 }
 static void try_capacity(uint32_t i){
@@ -125,6 +143,25 @@ static void try_capacity(uint32_t i){
     struct R133Unit *u=&units[i];
     if(u->cap||u->dead||u->attempts>=12u)return;
     ++u->attempts;
+    /* R140 card-reader safety: an empty USB reader LUN reports CHECK
+     * CONDITION on TEST UNIT READY. Unlike READ CAPACITY, TUR has NO
+     * data stage, so there is no 8-byte IN TD to stall/short-circuit
+     * before we can consume the CSW. In the old R133 path an empty
+     * LUN0 READ CAPACITY could fatally quarantine the reader's entire
+     * BOT slot, hiding populated LUN1..N. NEVER issue any disk write.
+     *
+     * Retry not-ready LUNs in the existing fair poll; a single LUN
+     * CHECK CONDITION does not disable the transport for its siblings. */
+    uint8_t tur[6]={0x00u,0u,0u,0u,0u,0u};
+    if(!bot(i,tur,6u,0,0u,1)){
+        if(!u->reported_failure){
+            kprintf("[R140-MSC] unit%u slot%u LUN%u not ready TUR/BOT=%u dead=%u\n",
+                i,frf_xhci_host_msc_slot_at(u->host),u->lun,
+                u->bot_error,u->dead);
+            u->reported_failure=1u;
+        }
+        return;
+    }
     uint8_t cdb[10]={0x25u,0u,0u,0u,0u,0u,0u,0u,0u,0u};
     if(!bot(i,cdb,10u,payload,8u,1)){
         if(!u->reported_failure){
@@ -169,7 +206,7 @@ void frf_pi4_um_reset(void){
     /* Re-scan must never reuse previous-generation drive mappings. */
     zero((uint8_t*)units,sizeof(units));
     used_units=registered_hosts=ready_units=0u;
-    next_global_retry=0u;retry_cursor=0u;
+    next_global_retry=0u;retry_cursor=0u;r141_read_fail_reports=0u;
     __atomic_store_n(&frf_r76_usb_mass_count,0u,__ATOMIC_RELEASE);
 }
 void frf_pi4_um_probe_inline(void){ discover_hosts(); }
@@ -270,9 +307,28 @@ void frf_pi4_um_service(void){
             if(op==FRF_UM_READ){
                 disk_cdb(cdb,0x28u,lba,n);
                 if(bot(index,cdb,10u,payload,bytes,1)){
+                    /* A successful read re-establishes valid media I/O.
+                     * R133 used a lifetime error counter which would
+                     * eventually quarantine the whole USB reader even
+                     * after unrelated intervening successful reads. */
+                    u->read_errors=0u;
                     for(uint32_t i=0;i<bytes;i++)s->data[i]=payload[i];
                     rc=(int32_t)bytes;
-                }else if(++u->read_errors>=3u){kill_host(u->host);}
+                }else{
+                    if(u->read_errors<3u)++u->read_errors;
+                    if(r141_read_fail_reports<16u){
+                        ++r141_read_fail_reports;
+                        kprintf("[R141-MSC] READ FAIL unit%u host%u LUN%u"
+                                " LBA%u count%u BOT=%u dead%u errors%u\n",
+                            index,u->host,u->lun,lba,n,u->bot_error,
+                            u->dead,u->read_errors);
+                    }
+                    /* Ordinary SCSI CHECK CONDITION (BOT code6) is
+                     * a per-LUN/media error, NOT a broken xHCI endpoint.
+                     * Do not kill every LUN on the physical reader.
+                     * Structural CBW/data/CSW transfer failures already
+                     * kill_host() inside bot() and still remain fatal. */
+                }
             }else if(op==FRF_UM_WRITE){
                 if(u->flags&FRF_UM_UNIT_WRITE){
                     /* Guest v0.6 stages in the FRUM mailbox before REQ. */

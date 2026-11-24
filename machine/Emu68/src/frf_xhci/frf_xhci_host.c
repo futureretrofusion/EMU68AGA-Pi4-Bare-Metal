@@ -1427,9 +1427,15 @@ static int frf_r133_register_msc(uint32_t iface,uint32_t vid,uint32_t pid)
     uint32_t got=0u;
     g_ctrl_buffer[0]=0u;
     uint32_t max_lun=0u;
-    if(frf_xhci_host_control(0xa1u,0xfeu,0u,(uint16_t)iface,
-                            g_ctrl_buffer,1u,1,&got) && got==1u)
-        max_lun=g_ctrl_buffer[0];
+    int max_lun_ok=frf_xhci_host_control(0xa1u,0xfeu,0u,
+                             (uint16_t)iface,g_ctrl_buffer,1u,1,&got);
+    if(max_lun_ok && got==1u)max_lun=g_ctrl_buffer[0];
+    /* R140 diagnostic: distinguish readers reporting LUN0 only from
+     * failed GET_MAX_LUN. On request failure, BOT specifies LUN0
+     * fallback; DO NOT invent LUNs and risk invalid CDB transport.
+     * A fallback indicates why additional card-reader slots are absent. */
+    kprintf("[R140-MSC] slot%u iface%u GET_MAX_LUN ok=%u got=%u value=%u\n",
+            g_slot_id,iface,max_lun_ok?1u:0u,got,max_lun);
     if(max_lun>7u)max_lun=7u; /* avoid unbounded empty-reader probing */
     struct R133MSC *m=&g_r133_msc[g_r133_msc_count];
     m->slot=g_slot_id;

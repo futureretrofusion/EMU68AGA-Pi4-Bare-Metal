@@ -22,6 +22,8 @@ extern void frf_post_usb_devices(unsigned kb, unsigned ms, unsigned gp, unsigned
 static uint8_t frf_pi4_hid_report_id[8];
 static uint8_t frf_pi4_hid_has_id[8];
 static uint16_t frf_pi4_hid_vid[8],frf_pi4_hid_pid[8];
+/* Report protocol must be negotiated individually; never change keyboard. */
+static uint8_t frf_pi4_mouse_report_mode[8];
 static uint8_t frf_pi4_hid_descriptor[512] __attribute__((aligned(64)));
 static uint8_t frf_pi4_find_report_id(const uint8_t *desc,unsigned len,unsigned proto)
 {
@@ -178,6 +180,7 @@ void frf_pi4_xhci_hid_main(void)
     for(unsigned j=0;j<8u;j++) {
         frf_pi4_hid_report_id[j]=0u;
         frf_pi4_hid_has_id[j]=0u;
+        frf_pi4_mouse_report_mode[j]=0u;
         frf_pi4_hid_vid[j]=frf_pi4_hid_pid[j]=0u;
     }
 
@@ -202,6 +205,30 @@ void frf_pi4_xhci_hid_main(void)
                     frf_pi4_hid_report_id[i]=id;
                 }
             }
+            /* R145: do NOT change a working mouse's USB HID protocol
+             * during boot. R144 negotiated SET_PROTOCOL(report) here, then
+             * rejected report formats not covered by its parser, making
+             * the pointer completely unresponsive on real Pi4 hardware.
+             * The xHCI host already set boot protocol (0) on this interface.
+             * Retain proven button/X/Y behaviour first; if this mouse
+             * supplies a fourth signed wheel byte in boot protocol, the
+             * existing R144 NewMouse $7A/$7B CIA bridge still handles it.
+             *
+             * Report-mode experimentation is disabled in production until
+             * a per-device live fallback has been validated on hardware. */
+#if defined(FRF_PI4_MOUSE_REPORT_PROTOCOL_EXPERIMENTAL)
+            if(proto==2u && received==wanted &&
+               frf_native_usb_mouse_set_descriptor_for(i,
+                    frf_pi4_hid_descriptor,received) &&
+               frf_xhci_host_native_control(i,0x21u,0x0bu,1u,
+                    (uint16_t)iface,NULL,0u,0,NULL)) {
+                frf_pi4_mouse_report_mode[i]=1u;
+                kprintf("[R144-WHEEL] experimental mouse slot%u report protocol enabled\n",i);
+            }
+#else
+            if(proto==2u)
+                kprintf("[R145-MOUSE] slot%u stay in proven boot protocol (4B wheel if available)\n",i);
+#endif
             kprintf("[PI4-HID] slot%u VID:PID=%04x:%04x proto%u descriptor=%u reportID=%u\n",
                     i,vid,pid,proto,received,frf_pi4_hid_report_id[i]);
         }
@@ -325,7 +352,22 @@ void frf_pi4_xhci_hid_main(void)
             /* HID Report Protocol may prepend a report ID to boot-format
              * keyboard/mouse payloads; strip only the descriptor-declared ID.
              * Do not reinterpret unrelated reports from a combo receiver. */
-            if(frf_pi4_hid_has_id[device] && (proto==1u || proto==2u)) {
+            /* R144 report-mode mice are decoded directly from their HID
+             * descriptor, including report ID; do not strip/guess first. */
+            if(proto==2u && frf_pi4_mouse_report_mode[device]) {
+                uint8_t normal[4];
+                if(frf_native_usb_mouse_decode_for(device,report,got,normal)){
+                    for(unsigned j=0;j<4u;j++)report[j]=normal[j];
+                    got=4u;
+                } else if(!frf_pi4_hid_has_id[device] && got==3u &&
+                          !(report[0]&0xf8u)) {
+                    /* A few boot mice accept report mode but keep sending
+                       three-byte boot packets. Preserve pointer/buttons. */
+                } else {
+                    /* Other composite report IDs aren't mouse movement. */
+                    continue;
+                }
+            } else if(frf_pi4_hid_has_id[device] && (proto==1u || proto==2u)) {
                 uint32_t id=frf_pi4_hid_report_id[device];
                 /* Pi3-v1.121 compatibility: boot protocol omits report IDs.
                  * Some wireless receivers ignore SET_PROTOCOL and keep IDs.

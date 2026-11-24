@@ -212,10 +212,13 @@ int frf_native_usb_pad_report_for(unsigned index,const uint8_t *b,unsigned len)
                        ((b[3]&0x02u)?4u:0u);
       /* Forward sticks 0/1 and 2/3, plus digital D-pad. The same
          20 percent dead zone and Pi3 secondary-button mapping apply. */
+      /* R143: Pi4 analogue sticks previously sent vertical motion
+         inverted at JOY1DAT. Reverse L/R analogue Y only; the Switch
+         D-pad bits in dy retain their existing independent mapping. */
       frf_native_usb_pad_update_axes(((int)lx-2048)/16,
-                                    ((int)ly-2048)/16,
+                                    -(((int)ly-2048)/16),
                                     dx?dx:((int)rx-2048)/16,
-                                    dy?dy:((int)ry-2048)/16,
+                                    dy?dy:-(((int)ry-2048)/16),
                                     buttons,8);
       return 1;
     }
@@ -228,7 +231,7 @@ int frf_native_usb_pad_report_for(unsigned index,const uint8_t *b,unsigned len)
                        ((b[1]&0x04u)?2u:0u)|
                        ((b[1]&0x02u)?4u:0u);
       frf_native_usb_pad_update_axes((int)((lx-32768)/256),
-                                    (int)((ly-32768)/256),
+                                    -(int)((ly-32768)/256),
                                     0,0,buttons,hat);
       return 1;
     }
@@ -243,8 +246,8 @@ int frf_native_usb_pad_report_for(unsigned index,const uint8_t *b,unsigned len)
     unsigned buttons=(unsigned)b[1]|(((unsigned)b[2]&0x7fu)<<8);
     int hat=(b[3]&0x0fu);
     if(hat>7)hat=8;
-    frf_native_usb_pad_update_axes((int)b[4]-128,(int)b[5]-128,
-                                   (int)b[6]-128,(int)b[7]-128,
+    frf_native_usb_pad_update_axes((int)b[4]-128,128-(int)b[5],
+                                   (int)b[6]-128,128-(int)b[7],
                                    buttons,hat);
     return 1;
   }
@@ -260,14 +263,16 @@ int frf_native_usb_pad_report_for(unsigned index,const uint8_t *b,unsigned len)
     if(pad->button_offset+size>len*8u)return 0;
     buttons=bits_get(b,len,pad->button_offset,size);
   }
-  int x=scale_axis(&pad->x,b,len),y=scale_axis(&pad->y,b,len);
+  /* Only Pi4 HID analogue vertical axes are reversed. Horizontal axes
+     and HID hat/digital D-pad direction encoding are unchanged. */
+  int x=scale_axis(&pad->x,b,len),y=-scale_axis(&pad->y,b,len);
   int hat=8;
   if(pad->hat.valid) {
     int hv=field_get(&pad->hat,b,len);
     hat=hv>=pad->hat.lo && hv<=pad->hat.hi ? hv-pad->hat.lo:8;
     if(hat>7)hat=8;
   }
-  int dx=scale_axis(&pad->extra_x,b,len),dy=scale_axis(&pad->extra_y,b,len);
+  int dx=scale_axis(&pad->extra_x,b,len),dy=-scale_axis(&pad->extra_y,b,len);
   frf_native_usb_pad_update_axes(x,y,dx,dy,buttons,hat);
   return 1;
 }

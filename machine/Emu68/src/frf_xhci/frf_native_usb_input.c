@@ -102,13 +102,217 @@ void frf_native_usb_keyboard_report(const uint8_t report[8])
     for(unsigned i=0;i<6u;i++) last_keys[i]=keys[i];
     __atomic_add_fetch(&frf_native_usb_key_reports,1u,__ATOMIC_RELAXED);
 }
+/* HID report-mode mouse (USB interface protocol 2). Boot protocol is
+   deliberately kept for devices without a usable wheel-bearing report.
+   All bit offsets refer to the full report, including a report ID when
+   present. Handles nested Pointer collections, constant padding,
+   button usages 1..3, signed X/Y and signed wheel up to 16 bits. */
+struct R144MouseField {
+    unsigned bit,size,valid;
+    int32_t logical_min;
+};
+struct R144MouseLayout {
+    unsigned valid,id,has_id;
+    struct R144MouseField button[3],x,y,wheel;
+};
+static struct R144MouseLayout r144_mouse[8];
+static uint32_t r144_bits(const uint8_t *p,unsigned len,unsigned bit,unsigned n)
+{
+    if(!p || !n || n>16u || (uint64_t)bit+n>(uint64_t)len*8u)return 0u;
+    uint32_t v=0u;
+    for(unsigned i=0u;i<n;i++)
+        if(p[(bit+i)>>3u]&(1u<<((bit+i)&7u)))v|=1u<<i;
+    return v;
+}
+static int32_t r144_sign(uint32_t x,unsigned bits)
+{
+    if(!bits || bits>32u)return 0;
+    if(bits==32u)return (int32_t)x;
+    const uint32_t sign=1u<<(bits-1u),mask=(1u<<bits)-1u;
+    x&=mask;
+    return (int32_t)((x^sign)-sign);
+}
+static int32_t r144_value(const struct R144MouseField *f,
+                          const uint8_t *p,unsigned len)
+{
+    uint32_t v=r144_bits(p,len,f->bit,f->size);
+    return f->logical_min<0?r144_sign(v,f->size):(int32_t)v;
+}
+int frf_native_usb_mouse_set_descriptor_for(unsigned index,const uint8_t *desc,unsigned len)
+{
+    if(index>=8u)return 0;
+    r144_mouse[index]=(struct R144MouseLayout){0};
+    if(!desc || len<12u || len>512u)return 0;
+    struct R144MouseLayout m={0};
+    uint16_t offsets[256]={0};
+    uint32_t page=0u,rsize=0u,rcount=0u,rid=0u;
+    int32_t logical_min=0,logical_max=0;
+    unsigned usages[32]={0},nusage=0u,umin=0u,umax=0u;
+    unsigned depth=0u,active_depth=0u;
+    /* HID Global Push/Pop is permitted; fail closed on stack overflow. */
+    struct {uint32_t page,size,count,id;int32_t min,max;} globals[4];
+    unsigned top=0u;
+    for(unsigned at=0;at<len;){
+        unsigned prefix=desc[at++];
+        if(prefix==0xfeu){
+            if(at+2u>len)return 0;
+            unsigned skip=desc[at];at+=2u;
+            if(skip>len-at)return 0;
+            at+=skip;continue;
+        }
+        unsigned size=prefix&3u;if(size==3u)size=4u;
+        if(size>len-at)return 0;
+        uint32_t val=0u;
+        for(unsigned k=0;k<size;k++)val|=(uint32_t)desc[at+k]<<(8u*k);
+        at+=size;
+        unsigned type=(prefix>>2u)&3u,tag=prefix>>4u;
+        if(type==1u){
+            switch(tag){
+            case 0:page=val;break;
+            case 1:logical_min=r144_sign(val,size*8u);break;
+            case 2:logical_max=logical_min<0?r144_sign(val,size*8u):(int32_t)val;break;
+            case 7:rsize=val;break;
+            case 8:rid=val&255u;break;
+            case 9:rcount=val;break;
+            case 10:
+                if(top>=4u)return 0;
+                globals[top].page=page;globals[top].size=rsize;
+                globals[top].count=rcount;globals[top].id=rid;
+                globals[top].min=logical_min;globals[top].max=logical_max;
+                ++top;break;
+            case 11:
+                if(!top)return 0;
+                --top;page=globals[top].page;rsize=globals[top].size;
+                rcount=globals[top].count;rid=globals[top].id;
+                logical_min=globals[top].min;logical_max=globals[top].max;
+                break;
+            default:break;
+            }
+        } else if(type==2u){
+            if(tag==0u){if(nusage<32u)usages[nusage++]=val;}
+            if(tag==1u)umin=val;
+            if(tag==2u)umax=val;
+        } else if(type==0u){
+            if(tag==10u){
+                unsigned usage=nusage?usages[0]:umin;
+                ++depth;
+                if(!active_depth && page==1u && usage==2u && val==1u)
+                    active_depth=depth; /* Mouse application */
+            }else if(tag==12u){
+                if(active_depth==depth)active_depth=0u;
+                if(depth)--depth;
+            }else if(tag==8u){
+                if(!rsize || rsize>32u || rcount>128u ||
+                   (uint64_t)rsize*rcount>512u)return 0;
+                unsigned base=offsets[rid];
+                if(rid && base==0u)base=8u;
+                if((uint64_t)base+(uint64_t)rsize*rcount>512u)return 0;
+                offsets[rid]=(uint16_t)(base+rsize*rcount);
+                if(active_depth && !(val&1u) && (val&2u)){
+                    for(unsigned k=0;k<rcount;k++){
+                        unsigned usage=k<nusage?usages[k]:
+                                 (umin && umin+k<=umax?umin+k:0u);
+                        struct R144MouseField *f=0;
+                        if(page==9u && usage>=1u && usage<=3u)
+                            f=&m.button[usage-1u];
+                        if(page==1u && usage==0x30u)f=&m.x;
+                        if(page==1u && usage==0x31u)f=&m.y;
+                        if(page==1u && usage==0x38u)f=&m.wheel;
+                        if(f && !f->valid && rsize<=16u &&
+                           (!m.valid || m.id==rid)){
+                            f->bit=base+k*rsize;
+                            f->size=rsize;
+                            f->logical_min=logical_min;
+                            f->valid=1u;
+                            m.id=rid;
+                            m.has_id=rid!=0u;
+                            m.valid=1u;
+                        }
+                    }
+                }
+            }
+            nusage=umin=umax=0u; /* Local HID usages expire at main item */
+        }
+    }
+    if(!m.valid || !m.x.valid || !m.y.valid || !m.wheel.valid ||
+       !m.button[0].valid || m.x.logical_min>=0 ||
+       m.y.logical_min>=0 || m.wheel.logical_min>=0)
+        return 0;
+    r144_mouse[index]=m;
+    return 1;
+}
+int frf_native_usb_mouse_decode_for(unsigned index,const uint8_t *bytes,unsigned len,
+                                    uint8_t normalized[4])
+{
+    if(index>=8u || !bytes || !len || !normalized ||
+       !r144_mouse[index].valid)return 0;
+    const struct R144MouseLayout *m=&r144_mouse[index];
+    if(m->has_id && bytes[0]!=m->id)return 0;
+    const struct R144MouseField *fields[6]={
+        &m->button[0],&m->button[1],&m->button[2],&m->x,&m->y,&m->wheel
+    };
+    for(unsigned k=0;k<6u;k++){
+        const struct R144MouseField *f=fields[k];
+        if(f->valid && ((uint64_t)f->bit+f->size>(uint64_t)len*8u))
+            return 0;
+    }
+    unsigned buttons=0u;
+    for(unsigned k=0;k<3u;k++)
+        if(m->button[k].valid && r144_value(&m->button[k],bytes,len))
+            buttons|=1u<<k;
+    int32_t x=r144_value(&m->x,bytes,len);
+    int32_t y=r144_value(&m->y,bytes,len);
+    int32_t wheel=r144_value(&m->wheel,bytes,len);
+    if(x>127)x=127;
+    if(x< -127)x=-127;
+    if(y>127)y=127;
+    if(y< -127)y=-127;
+    if(wheel>127)wheel=127;
+    if(wheel< -127)wheel=-127;
+    normalized[0]=(uint8_t)buttons;
+    normalized[1]=(uint8_t)(int8_t)x;
+    normalized[2]=(uint8_t)(int8_t)y;
+    normalized[3]=(uint8_t)(int8_t)wheel;
+    return 1;
+}
+/* R144 NewMouse compatible CIA raw-key bridge. The NewMouse wheel
+   assignments are 0x7A (up) and 0x7B (down); each detent is a
+   make+break pair. These enter the existing CPU1->CPU3 virtual CIA
+   keyboard queue, not the mouse button bits or a Poseidon handler. */
+volatile uint32_t frf_r144_wheel_up,frf_r144_wheel_down;
+volatile uint32_t frf_r144_wheel_last,frf_r144_wheel_reports;
+static void frf_r144_emit_wheel(int wheel)
+{
+    if(!wheel)return;
+    __atomic_store_n(&frf_r144_wheel_last,(uint32_t)(int32_t)wheel,__ATOMIC_RELAXED);
+    __atomic_add_fetch(&frf_r144_wheel_reports,1u,__ATOMIC_RELAXED);
+    /* Never monopolise the 64-byte CIA keyboard queue if a high
+       resolution HID device reports many detents in one packet. */
+    if(wheel>8)wheel=8;
+    if(wheel< -8)wheel=-8;
+    /* R146: hardware test on Pi4 showed the physical wheel direction
+       reversed relative to the NewMouse/FreeWheel up/down semantics.
+       Keep NewMouse keycodes intact, reverse ONLY HID wheel sign. */
+    const uint8_t key=wheel>0?0x7bu:0x7au;
+    const unsigned steps=wheel>0?(unsigned)wheel:(unsigned)-wheel;
+    for(unsigned n=0;n<steps;n++){
+        frf_vcia_keyboard_raw(key);
+        frf_vcia_keyboard_raw((uint8_t)(key|0x80u));
+    }
+    if(wheel<0)
+        __atomic_add_fetch(&frf_r144_wheel_up,steps,__ATOMIC_RELAXED);
+    else
+        __atomic_add_fetch(&frf_r144_wheel_down,steps,__ATOMIC_RELAXED);
+}
 void frf_native_usb_mouse_report(const uint8_t *r,unsigned length)
 {
-    if(!r || length<3u) return;
-    /* USB HID boot protocol: button mask, signed X and Y deltas. */
-    unsigned buttons=(unsigned)(r[0]&7u);
+    if(!r || length<3u)return;
+    /* Normalized mouse report: buttons, signed X, signed Y,
+       optional signed vertical wheel in byte 3. Boot 3B still works. */
+    const unsigned buttons=(unsigned)(r[0]&7u);
     aga_virtual_mouse_update((int8_t)r[1],(int8_t)r[2],buttons);
     __atomic_add_fetch(&frf_native_usb_mouse_reports,1u,__ATOMIC_RELAXED);
+    if(length>=4u)frf_r144_emit_wheel((int8_t)r[3]);
 }
 void frf_native_usb_pad_release(void)
 {
